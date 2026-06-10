@@ -1,0 +1,44 @@
+# Copy to config.yaml and edit before starting the pool.
+
+pool_name: "My BTX Pool"
+
+# Stratum endpoint for miners (amdbtx compatible)
+stratum_host: "0.0.0.0"
+stratum_port: 3333
+
+# Web dashboard + API
+api_host: "0.0.0.0"
+api_port: 8080
+
+# BTX full node RPC
+rpc_url: "http://192.168.1.15:19334"
+rpc_user: "miner"
+rpc_password: "miner"
+# Local node with cookie auth instead:
+# rpc_url: "http://127.0.0.1:19334"
+# rpc_cookie_file: "~/.btx/.cookie"
+
+# Pool receives block rewards here (btx1z... P2MR address)
+pool_address: "btx1zYOUR_POOL_PAYOUT_ADDRESS"
+
+pool_fee_percent: 0.0
+
+# Starting share difficulty (vardiff adjusts per miner)
+default_difficulty: 0.01
+vardiff_enabled: true
+vardiff_target_seconds: 30
+vardiff_min: 0.001
+vardiff_max: 100.0
+
+# Template polling
+job_poll_interval: 5.0
+gbt_longpoll: true
+gbt_longpoll_timeout: 60.0
+
+# CPU solver for share verification (build from amdbtx repo)
+# bash build_solver.sh  →  amdbtx-private-solver/build/btx-gbt-solve-hip
+solver_path: ""
+solver_backend: "cpu"
+
+database_path: "data/pool.db"
+log_level: "INFO"

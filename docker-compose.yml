@@ -1,0 +1,15 @@
+services:
+  btxpool:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "3333:3333"
+      - "8080:8080"
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+      - ./data:/app/data
+      - ${BTX_DATADIR:-~/.btx}:/root/.btx:ro
+    environment:
+      BTXPOOL_CONFIG: /app/config.yaml
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
