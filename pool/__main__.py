@@ -64,11 +64,13 @@ async def run_pool(cfg: dict) -> None:
             asyncio.run_coroutine_threadsafe(stratum.broadcast_job(job), loop)
 
     def poll_jobs():
-        last_id = None
+        last_block_key = None
         while not job_event.is_set():
             job = jobs.current_job
-            if job and job.job_id != last_id:
-                last_id = job.job_id
+            block_key = jobs.block_key()
+            if job and jobs.consume_broadcast_flag():
+                if block_key != last_block_key:
+                    last_block_key = block_key
                 on_new_job()
             job_event.wait(2.0)
 

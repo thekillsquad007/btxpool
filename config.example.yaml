@@ -31,8 +31,9 @@ vardiff_min: 0.001
 vardiff_max: 100.0
 
 # Template polling
-job_poll_interval: 5.0
-gbt_longpoll: true
+job_poll_interval: 10.0
+seed_broadcast_interval: 60.0
+gbt_longpoll: false
 gbt_longpoll_timeout: 60.0
 
 # CPU solver for share verification (build from amdbtx repo)

@@ -96,6 +96,8 @@ class JobManager:
         self._thread: threading.Thread | None = None
         self._last_error = ""
         self._synced = False
+        self._last_seed_broadcast = 0.0
+        self._needs_broadcast = False
 
     @property
     def difficulty(self) -> float:
@@ -118,6 +120,19 @@ class JobManager:
     def get_job(self, job_id: str) -> PoolJob | None:
         with self._lock:
             return self._jobs.get(job_id)
+
+    def consume_broadcast_flag(self) -> bool:
+        with self._lock:
+            if self._needs_broadcast:
+                self._needs_broadcast = False
+                return True
+            return False
+
+    def block_key(self) -> tuple[str, int] | None:
+        with self._lock:
+            if not self._current:
+                return None
+            return self._block_key(self._current)
 
     def status(self) -> dict[str, Any]:
         with self._lock:
@@ -150,19 +165,19 @@ class JobManager:
         raise RuntimeError(f"cannot resolve scriptPubKey for pool address {address}")
 
     @staticmethod
+    def _block_key(job: PoolJob) -> tuple:
+        """Identity of the block being mined — seeds/merkle may advance with curtime."""
+        return (job.prev_hash, job.block_height)
+
+    @staticmethod
     def _work_fingerprint(job: PoolJob) -> tuple:
         return (
             job.prev_hash,
-            job.merkle_root,
-            job.version,
-            job.bits,
+            job.block_height,
             job.seed_a,
             job.seed_b,
-            job.block_height,
-            job.matmul_n,
-            job.matmul_b,
-            job.matmul_r,
-            job.epsilon_bits,
+            job.merkle_root,
+            job.time,
         )
 
     def _job_from_template(
@@ -262,25 +277,38 @@ class JobManager:
             return None
 
         job = self._job_from_template(gbt, challenge, clean=clean)
+        seed_interval = float(self.cfg.get("seed_broadcast_interval", 60.0))
+        now = time.time()
         with self._lock:
             self._network_target = job.block_target
             self._height = job.block_height
             current = self._current
-            if current and self._work_fingerprint(current) == self._work_fingerprint(job):
+
+            if current and self._block_key(current) == self._block_key(job):
+                work_changed = self._work_fingerprint(current) != self._work_fingerprint(job)
                 current.time = job.time
                 current.gbt = job.gbt
+                current.merkle_root = job.merkle_root
+                current.seed_a = job.seed_a
+                current.seed_b = job.seed_b
+                current.bits = job.bits
+                current.block_target = job.block_target
                 current.share_target = job.share_target
+                current.clean_jobs = False
+                if work_changed and now - self._last_seed_broadcast >= seed_interval:
+                    self._last_seed_broadcast = now
+                    self._needs_broadcast = True
                 return current
 
             if len(self._jobs) > 32:
                 oldest = sorted(self._jobs.values(), key=lambda j: j.created_at)[:-32]
                 for old in oldest:
                     self._jobs.pop(old.job_id, None)
-            prev_height = current.block_height if current else -1
-            if prev_height != job.block_height:
-                job.clean_jobs = True
+            job.clean_jobs = True
             self._jobs[job.job_id] = job
             self._current = job
+            self._last_seed_broadcast = now
+            self._needs_broadcast = True
 
         log.info(
             "new job %s height=%d diff=%.4f share_target=%s...",
@@ -289,12 +317,9 @@ class JobManager:
         return job
 
     def _poll_loop(self) -> None:
-        interval = float(self.cfg.get("job_poll_interval", 5.0))
+        interval = float(self.cfg.get("job_poll_interval", 10.0))
         while not self._stop.is_set():
-            prev_id = self.current_job.job_id if self.current_job else None
-            job = self.refresh(clean=False, longpoll=False)
-            if job and job.job_id != prev_id:
-                job.clean_jobs = True
+            self.refresh(clean=False, longpoll=False)
             self._stop.wait(interval)
 
     def _longpoll_loop(self) -> None:
@@ -304,10 +329,7 @@ class JobManager:
                 self._stop.wait(5.0)
                 continue
             try:
-                prev_id = self.current_job.job_id if self.current_job else None
-                job = self.refresh(clean=False, longpoll=True)
-                if job and job.job_id != prev_id:
-                    job.clean_jobs = True
+                self.refresh(clean=False, longpoll=True)
             except Exception as e:
                 log.debug("longpoll refresh: %s", e)
             self._stop.wait(1.0)

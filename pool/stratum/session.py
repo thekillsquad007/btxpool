@@ -160,9 +160,6 @@ class StratumSession:
             "subscribe %s agent=%s caps=%s",
             self.peer, user_agent, extension.get("protocol_compliant", PROTOCOL_CAPABILITIES),
         )
-        # Do not block the read loop on push messages — btx-nvidia-miner sends
-        # mining.authorize immediately and times out after 30s waiting for id:2.
-        asyncio.create_task(self._push_work())
 
     async def _push_work(self) -> None:
         try:
@@ -184,10 +181,12 @@ class StratumSession:
         self._worker_name = worker
         self._canonical_name = f"{address}.{worker}"
 
-        # btx-nvidia-miner waits up to 30s for this exact RPC id (usually 2).
+        # Send authorize before any notify/difficulty push. A notify holding send_lock
+        # on a slow LAN path was delaying id:2 past the miner's 30s handshake timeout.
         await self.send({"id": req_id, "result": True, "error": None})
         self._authorized = True
         log.info("authorized %s as %s (req_id=%s)", self.peer, self._canonical_name, req_id)
+        asyncio.create_task(self._push_work())
         asyncio.create_task(self._finish_authorize(address, worker))
 
     async def _finish_authorize(self, address: str, worker: str) -> None:
