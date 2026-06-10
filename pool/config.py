@@ -19,7 +19,7 @@ DEFAULTS: dict[str, Any] = {
     "rpc_cookie_file": "",
     "pool_address": "",
     "pool_fee_percent": 0.0,
-    "default_difficulty": 0.01,
+    "default_difficulty": 0.001,
     "vardiff_enabled": True,
     "vardiff_target_seconds": 30,
     "vardiff_min": 0.001,

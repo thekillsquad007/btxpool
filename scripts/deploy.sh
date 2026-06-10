@@ -82,7 +82,7 @@ fi
 
 cat >> config.yaml <<EOF
 pool_address: "$POOL_ADDRESS"
-default_difficulty: 0.01
+default_difficulty: 0.001
 solver_path: "$SOLVER_PATH"
 solver_backend: "cpu"
 database_path: "data/pool.db"

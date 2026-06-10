@@ -24,7 +24,7 @@ pool_address: "btx1zYOUR_POOL_PAYOUT_ADDRESS"
 pool_fee_percent: 0.0
 
 # Starting share difficulty (vardiff adjusts per miner)
-default_difficulty: 0.01
+default_difficulty: 0.001
 vardiff_enabled: true
 vardiff_target_seconds: 30
 vardiff_min: 0.001
