@@ -167,6 +167,12 @@ class StratumSession:
             notify = self.get_job_notify()
             if notify:
                 await self.send_notify(notify)
+                log.info("pushed job %s to %s", notify[0], self.peer)
+            else:
+                log.warning(
+                    "no active job for %s — miner will idle until btxd syncs or template fetch succeeds",
+                    self.peer,
+                )
         except Exception as e:
             log.warning("push work failed for %s: %s", self.peer, e)
 
