@@ -96,8 +96,8 @@ class JobManager:
         self._thread: threading.Thread | None = None
         self._last_error = ""
         self._synced = False
-        self._last_seed_broadcast = 0.0
         self._needs_broadcast = False
+        self._broadcast_job: PoolJob | None = None
 
     @property
     def difficulty(self) -> float:
@@ -127,6 +127,13 @@ class JobManager:
                 self._needs_broadcast = False
                 return True
             return False
+
+    def take_broadcast_job(self) -> PoolJob | None:
+        """Return the exact job that requested broadcast (not a later current_job)."""
+        with self._lock:
+            job = self._broadcast_job
+            self._broadcast_job = None
+            return job
 
     def block_key(self) -> tuple[str, int] | None:
         with self._lock:
@@ -170,14 +177,15 @@ class JobManager:
         return (job.prev_hash, job.block_height)
 
     @staticmethod
-    def _work_fingerprint(job: PoolJob) -> tuple:
+    def _header_fingerprint(job: PoolJob) -> tuple:
+        """Header fields that define MatMul work (v2 seeds derive from these)."""
         return (
             job.prev_hash,
             job.block_height,
-            job.seed_a,
-            job.seed_b,
+            job.version,
             job.merkle_root,
             job.time,
+            job.bits,
         )
 
     def _job_from_template(
@@ -277,38 +285,45 @@ class JobManager:
             return None
 
         job = self._job_from_template(gbt, challenge, clean=clean)
-        seed_interval = float(self.cfg.get("seed_broadcast_interval", 60.0))
-        now = time.time()
         with self._lock:
             self._network_target = job.block_target
             self._height = job.block_height
             current = self._current
 
             if current and self._block_key(current) == self._block_key(job):
-                work_changed = self._work_fingerprint(current) != self._work_fingerprint(job)
-                current.time = job.time
-                current.gbt = job.gbt
-                current.merkle_root = job.merkle_root
-                current.seed_a = job.seed_a
-                current.seed_b = job.seed_b
-                current.bits = job.bits
-                current.block_target = job.block_target
-                current.share_target = job.share_target
-                current.clean_jobs = False
-                if work_changed and now - self._last_seed_broadcast >= seed_interval:
-                    self._last_seed_broadcast = now
-                    self._needs_broadcast = True
-                return current
+                if self._header_fingerprint(current) == self._header_fingerprint(job):
+                    # Challenge seeds refresh every RPC poll but v2 work only depends
+                    # on the header; keep job id stable and avoid notify churn.
+                    current.seed_a = job.seed_a
+                    current.seed_b = job.seed_b
+                    current.gbt = job.gbt
+                    current.block_target = job.block_target
+                    current.share_target = difficulty_to_share_target(
+                        self._difficulty, job.block_target or None
+                    )
+                    return current
 
-            if len(self._jobs) > 32:
-                oldest = sorted(self._jobs.values(), key=lambda j: j.created_at)[:-32]
-                for old in oldest:
-                    self._jobs.pop(old.job_id, None)
-            job.clean_jobs = True
-            self._jobs[job.job_id] = job
-            self._current = job
-            self._last_seed_broadcast = now
-            self._needs_broadcast = True
+                # Header advanced (curtime, merkle, bits). Keep prior job ids
+                # immutable for share validation; issue a new id and notify miners.
+                height = job.block_height
+                job.job_id = f"btx-{height}-{secrets.token_hex(4)}"
+                job.clean_jobs = (
+                    current.merkle_root != job.merkle_root or current.time != job.time
+                )
+                self._jobs[job.job_id] = job
+                self._current = job
+                self._needs_broadcast = True
+                self._broadcast_job = job
+            else:
+                if len(self._jobs) > 64:
+                    oldest = sorted(self._jobs.values(), key=lambda j: j.created_at)[:-64]
+                    for old in oldest:
+                        self._jobs.pop(old.job_id, None)
+                job.clean_jobs = True
+                self._jobs[job.job_id] = job
+                self._current = job
+                self._needs_broadcast = True
+                self._broadcast_job = job
 
         log.info(
             "new job %s height=%d diff=%.4f share_target=%s...",

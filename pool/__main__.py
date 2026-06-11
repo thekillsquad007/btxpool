@@ -45,6 +45,7 @@ async def run_pool(cfg: dict) -> None:
     validator = ShareValidator(
         solver_path=cfg.get("solver_path", ""),
         backend=cfg.get("solver_backend", "cpu"),
+        runtime_ld_path=cfg.get("solver_runtime_ld_path", ""),
     )
     if not validator.available:
         logging.getLogger(__name__).warning(
@@ -58,20 +59,20 @@ async def run_pool(cfg: dict) -> None:
     loop = asyncio.get_running_loop()
     job_event = threading.Event()
 
-    def on_new_job():
-        job = jobs.current_job
+    def on_new_job(job):
         if job:
             asyncio.run_coroutine_threadsafe(stratum.broadcast_job(job), loop)
 
     def poll_jobs():
         last_block_key = None
         while not job_event.is_set():
-            job = jobs.current_job
             block_key = jobs.block_key()
-            if job and jobs.consume_broadcast_flag():
-                if block_key != last_block_key:
-                    last_block_key = block_key
-                on_new_job()
+            if jobs.consume_broadcast_flag():
+                job = jobs.take_broadcast_job() or jobs.current_job
+                if job:
+                    if block_key != last_block_key:
+                        last_block_key = block_key
+                    on_new_job(job)
             job_event.wait(2.0)
 
     threading.Thread(target=poll_jobs, daemon=True, name="job-broadcast").start()

@@ -74,13 +74,13 @@ class StratumServer:
         job = self.jobs.current_job
         return job.to_notify_params() if job else None
 
-    def _vardiff(self, address: str, current: float) -> float:
+    def _vardiff(self, canonical_name: str, current: float) -> float:
         if not self._vardiff_enabled:
             return current
         now = time.time()
-        last = self._last_share_time.get(address, now)
+        last = self._last_share_time.get(canonical_name, now)
         elapsed = max(now - last, 0.1)
-        self._last_share_time[address] = now
+        self._last_share_time[canonical_name] = now
         ratio = elapsed / self._vardiff_target
         if ratio > 1.5:
             new_diff = min(current * ratio * 0.8, self._vardiff_max)
@@ -98,6 +98,7 @@ class StratumServer:
             writer,
             on_submit=self._on_submit,
             on_authorize=self._on_authorize,
+            on_metrics=self._on_metrics,
             get_job_notify=self._get_notify,
             get_difficulty=lambda: self.jobs.difficulty,
             vardiff_callback=self._vardiff,
@@ -108,6 +109,14 @@ class StratumServer:
             await session.handle()
         finally:
             self._sessions.discard(session)
+
+    async def _on_metrics(self, canonical_name: str, solver_nps: float) -> None:
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(
+            None,
+            lambda: self.db.record_metrics(canonical_name, solver_nps),
+        )
+        log.debug("metrics %s solver_nps=%.0f", canonical_name, solver_nps)
 
     async def _on_authorize(self, address: str, worker_name: str) -> bool:
         loop = asyncio.get_running_loop()
@@ -135,10 +144,13 @@ class StratumServer:
         nonce64: int,
         difficulty: float,
     ) -> dict[str, Any]:
-        job = self.jobs.get_job(job_id) or self.jobs.current_job
+        job = self.jobs.get_job(job_id)
         if not job:
-            log.info("share rejected %s.%s job=%s: no active job", address[:16], worker_name, job_id)
-            return {"accepted": False, "error": "No active job", "error_code": 21}
+            log.info(
+                "share rejected %s.%s job=%s: stale or unknown job",
+                address[:16], worker_name, job_id,
+            )
+            return {"accepted": False, "error": "Stale job", "error_code": 21}
 
         log.info(
             "share submit %s.%s job=%s nonce=%016x",
@@ -158,19 +170,26 @@ class StratumServer:
             )
         except Exception as e:
             log.warning("share verify error: %s", e)
-            self.db.record_share(address, worker_name, job_id, f"{nonce64:016x}", difficulty, False)
+            self.db.record_share(
+                address, worker_name, job_id, f"{nonce64:016x}", difficulty, False,
+                canonical_name=canonical_name,
+            )
             return {"accepted": False, "error": str(e), "error_code": 20}
 
         if not verification.get("valid"):
             reason = verification.get("reason", "invalid")
-            self.db.record_share(address, worker_name, job_id, f"{nonce64:016x}", difficulty, False)
+            self.db.record_share(
+                address, worker_name, job_id, f"{nonce64:016x}", difficulty, False,
+                canonical_name=canonical_name,
+            )
             code = 23 if reason in ("target_miss", "no_solution") else 20
             log.info("share rejected %s.%s job=%s: %s", address[:16], worker_name, job_id, reason)
             return {"accepted": False, "error": reason, "error_code": code}
 
         is_block = bool(verification.get("is_block"))
         self.db.record_share(
-            address, worker_name, job_id, f"{nonce64:016x}", difficulty, True, is_block
+            address, worker_name, job_id, f"{nonce64:016x}", difficulty, True, is_block,
+            canonical_name=canonical_name,
         )
         log.info(
             "share accepted %s.%s job=%s%s",

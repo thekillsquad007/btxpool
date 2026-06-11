@@ -39,6 +39,7 @@ class StratumSession:
         *,
         on_submit: Callable[..., Any],
         on_authorize: Callable[..., Any],
+        on_metrics: Callable[..., Any] | None = None,
         get_job_notify: Callable[[], list | None],
         get_difficulty: Callable[[], float],
         vardiff_callback: Callable[[str, float], float] | None = None,
@@ -48,6 +49,7 @@ class StratumSession:
         self.writer = writer
         self.on_submit = on_submit
         self.on_authorize = on_authorize
+        self.on_metrics = on_metrics
         self.get_job_notify = get_job_notify
         self.get_difficulty = get_difficulty
         self.vardiff_callback = vardiff_callback
@@ -131,7 +133,9 @@ class StratumSession:
             await self._handle_submit(req_id, params)
         elif method == "mining.extranonce.subscribe":
             await self.send({"id": req_id, "result": True, "error": None})
-        elif method in ("worker.report_metrics", "mining.configure"):
+        elif method == "worker.report_metrics":
+            await self._handle_report_metrics(params)
+        elif method == "mining.configure":
             return
         else:
             if req_id is not None:
@@ -208,6 +212,30 @@ class StratumSession:
             except Exception as e:
                 log.warning("canonical name push failed for %s: %s", self.peer, e)
 
+    async def _handle_report_metrics(self, params: list) -> None:
+        if not self._authorized or not self.on_metrics:
+            return
+        if not params:
+            return
+        payload = params[0]
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except json.JSONDecodeError:
+                return
+        if not isinstance(payload, dict):
+            return
+        try:
+            solver_nps = float(payload.get("solver_nps") or 0)
+        except (TypeError, ValueError):
+            return
+        if solver_nps <= 0:
+            return
+        try:
+            await self.on_metrics(self._canonical_name, solver_nps)
+        except Exception as e:
+            log.debug("metrics callback failed for %s: %s", self.peer, e)
+
     async def _handle_submit(self, req_id: Any, params: list) -> None:
         if not self._authorized:
             await self.send({"id": req_id, "result": False, "error": [25, "Not authorized", None]})
@@ -240,7 +268,7 @@ class StratumSession:
             self._shares_session += 1
             self._last_share_at = time.time()
             if self.vardiff_callback:
-                new_diff = self.vardiff_callback(self._address, self._session_difficulty)
+                new_diff = self.vardiff_callback(self._canonical_name, self._session_difficulty)
                 if abs(new_diff - self._session_difficulty) > 1e-9:
                     await self.send_set_difficulty(new_diff)
         else:

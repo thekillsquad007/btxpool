@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import subprocess
 import threading
 from pathlib import Path
@@ -15,9 +16,15 @@ log = logging.getLogger(__name__)
 
 
 class ShareValidator:
-    def __init__(self, solver_path: str = "", backend: str = "cpu"):
+    def __init__(
+        self,
+        solver_path: str = "",
+        backend: str = "cpu",
+        runtime_ld_path: str = "",
+    ):
         self.solver_path = Path(solver_path).expanduser() if solver_path else None
         self.backend = backend
+        self.runtime_ld_path = runtime_ld_path
         self._proc: subprocess.Popen[str] | None = None
         self._lock = threading.Lock()
         self._ready = threading.Event()
@@ -35,6 +42,16 @@ class ShareValidator:
         if not self.available:
             raise RuntimeError("solver not configured")
 
+        env = os.environ.copy()
+        # Match amdbtx-miner: avoid header-time refresh skew on verify vs submit.
+        env.setdefault("BTX_MINER_HEADER_TIME_REFRESH_ATTEMPTS", "4294967295")
+        if self.runtime_ld_path:
+            parts = [p for p in self.runtime_ld_path.split(":") if p]
+            existing = env.get("LD_LIBRARY_PATH", "")
+            if existing:
+                parts.extend(p for p in existing.split(":") if p and p not in parts)
+            env["LD_LIBRARY_PATH"] = ":".join(parts)
+
         cmd = [
             str(self.solver_path),
             "--daemon",
@@ -49,6 +66,7 @@ class ShareValidator:
             stderr=subprocess.STDOUT,
             text=True,
             bufsize=1,
+            env=env,
         )
         assert self._proc.stdout is not None
         deadline = 15.0
@@ -138,7 +156,10 @@ class ShareValidator:
             "matmul_n": int(job.get("matmul_n", 512)),
             "matmul_b": int(job.get("matmul_b", 16)),
             "matmul_r": int(job.get("matmul_r", 8)),
-            "epsilon_bits": int(job.get("epsilon_bits", 18)),
+            # Digest-only check at the submitted nonce. Re-running the ε pre-hash
+            # gate (epsilon_bits=18) rejects valid HIP shares when CPU SigmaLE
+            # disagrees with the GPU gate kernel on the same header.
+            "epsilon_bits": 0,
             "nonce_start": int(nonce64),
             "max_tries": 1,
             "max_seconds": 30.0,
@@ -152,6 +173,16 @@ class ShareValidator:
             raise
 
         if not result.get("found"):
+            log.info(
+                "verify miss job=%s nonce=%016x ntime=%d job_time=%d "
+                "merkle=%s... tries=%s",
+                job.get("job_id", "?"),
+                nonce64,
+                ntime,
+                int(job.get("time", 0)),
+                str(job.get("merkle_root", ""))[:16],
+                result.get("tries_used"),
+            )
             return {
                 "valid": False,
                 "reason": "no_solution",

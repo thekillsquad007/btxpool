@@ -9,6 +9,14 @@ from pathlib import Path
 from typing import Any
 
 
+def miner_canonical_name(
+    address: str, worker_name: str = "", canonical_name: str = ""
+) -> str:
+    if canonical_name:
+        return canonical_name
+    return f"{address}.{worker_name}" if worker_name else address
+
+
 class PoolDatabase:
     def __init__(self, path: str):
         self.path = Path(path)
@@ -22,17 +30,20 @@ class PoolDatabase:
         with self._lock:
             self._conn.executescript("""
                 CREATE TABLE IF NOT EXISTS miners (
-                    address TEXT PRIMARY KEY,
+                    canonical_name TEXT PRIMARY KEY,
+                    address TEXT NOT NULL,
                     worker_name TEXT NOT NULL DEFAULT '',
-                    canonical_name TEXT NOT NULL DEFAULT '',
                     first_seen REAL NOT NULL,
                     last_seen REAL NOT NULL,
                     difficulty REAL NOT NULL DEFAULT 0.01,
                     shares_valid INTEGER NOT NULL DEFAULT 0,
                     shares_invalid INTEGER NOT NULL DEFAULT 0,
                     blocks_found INTEGER NOT NULL DEFAULT 0,
-                    hashrate_estimate REAL NOT NULL DEFAULT 0
+                    hashrate_estimate REAL NOT NULL DEFAULT 0,
+                    metrics_updated_at REAL NOT NULL DEFAULT 0
                 );
+
+                CREATE INDEX IF NOT EXISTS idx_miners_address ON miners(address);
 
                 CREATE TABLE IF NOT EXISTS shares (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -59,7 +70,100 @@ class PoolDatabase:
                     value TEXT NOT NULL
                 );
             """)
+            self._migrate_schema()
             self._conn.commit()
+
+    def _migrate_schema(self) -> None:
+        cols = {
+            row["name"]: row
+            for row in self._conn.execute("PRAGMA table_info(miners)").fetchall()
+        }
+        if "metrics_updated_at" not in cols:
+            self._conn.execute(
+                "ALTER TABLE miners ADD COLUMN metrics_updated_at REAL NOT NULL DEFAULT 0"
+            )
+        address_col = cols.get("address")
+        if address_col is not None and int(address_col["pk"]) == 1:
+            self._migrate_miners_to_canonical_pk()
+
+    def _migrate_miners_to_canonical_pk(self) -> None:
+        self._conn.executescript("""
+            CREATE TABLE miners_new (
+                canonical_name TEXT PRIMARY KEY,
+                address TEXT NOT NULL,
+                worker_name TEXT NOT NULL DEFAULT '',
+                first_seen REAL NOT NULL,
+                last_seen REAL NOT NULL,
+                difficulty REAL NOT NULL DEFAULT 0.01,
+                shares_valid INTEGER NOT NULL DEFAULT 0,
+                shares_invalid INTEGER NOT NULL DEFAULT 0,
+                blocks_found INTEGER NOT NULL DEFAULT 0,
+                hashrate_estimate REAL NOT NULL DEFAULT 0,
+                metrics_updated_at REAL NOT NULL DEFAULT 0
+            );
+
+            INSERT INTO miners_new (
+                canonical_name, address, worker_name, first_seen, last_seen,
+                difficulty, shares_valid, shares_invalid, blocks_found,
+                hashrate_estimate, metrics_updated_at
+            )
+            SELECT
+                CASE
+                    WHEN canonical_name != '' THEN canonical_name
+                    WHEN worker_name != '' THEN address || '.' || worker_name
+                    ELSE address
+                END,
+                address,
+                worker_name,
+                first_seen,
+                last_seen,
+                difficulty,
+                shares_valid,
+                shares_invalid,
+                blocks_found,
+                hashrate_estimate,
+                metrics_updated_at
+            FROM miners;
+
+            INSERT OR IGNORE INTO miners_new (
+                canonical_name, address, worker_name, first_seen, last_seen, difficulty
+            )
+            SELECT
+                CASE
+                    WHEN worker_name != '' THEN address || '.' || worker_name
+                    ELSE address
+                END,
+                address,
+                worker_name,
+                MIN(created_at),
+                MAX(created_at),
+                0.01
+            FROM shares
+            GROUP BY address, worker_name;
+
+            UPDATE miners_new SET shares_valid = (
+                SELECT COUNT(*)
+                FROM shares
+                WHERE CASE
+                    WHEN shares.worker_name != '' THEN shares.address || '.' || shares.worker_name
+                    ELSE shares.address
+                END = miners_new.canonical_name
+            );
+
+            UPDATE miners_new SET blocks_found = (
+                SELECT COUNT(*)
+                FROM shares
+                WHERE is_block = 1
+                  AND CASE
+                      WHEN shares.worker_name != '' THEN shares.address || '.' || shares.worker_name
+                      ELSE shares.address
+                  END = miners_new.canonical_name
+            );
+
+            DROP TABLE miners;
+            ALTER TABLE miners_new RENAME TO miners;
+            CREATE INDEX IF NOT EXISTS idx_miners_address ON miners(address);
+        """)
 
     def upsert_miner(
         self,
@@ -68,19 +172,22 @@ class PoolDatabase:
         canonical_name: str = "",
         difficulty: float = 0.01,
     ) -> None:
+        key = miner_canonical_name(address, worker_name, canonical_name)
         now = time.time()
         with self._lock:
             self._conn.execute(
                 """
-                INSERT INTO miners (address, worker_name, canonical_name, first_seen, last_seen, difficulty)
+                INSERT INTO miners (
+                    canonical_name, address, worker_name, first_seen, last_seen, difficulty
+                )
                 VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT(address) DO UPDATE SET
+                ON CONFLICT(canonical_name) DO UPDATE SET
+                    address=excluded.address,
                     worker_name=excluded.worker_name,
-                    canonical_name=excluded.canonical_name,
                     last_seen=excluded.last_seen,
                     difficulty=excluded.difficulty
                 """,
-                (address, worker_name, canonical_name, now, now, difficulty),
+                (key, address, worker_name, now, now, difficulty),
             )
             self._conn.commit()
 
@@ -93,7 +200,9 @@ class PoolDatabase:
         difficulty: float,
         valid: bool,
         is_block: bool = False,
+        canonical_name: str = "",
     ) -> None:
+        key = miner_canonical_name(address, worker_name, canonical_name)
         now = time.time()
         with self._lock:
             if valid:
@@ -102,11 +211,10 @@ class PoolDatabase:
                     UPDATE miners SET
                         shares_valid = shares_valid + 1,
                         blocks_found = blocks_found + ?,
-                        last_seen = ?,
-                        hashrate_estimate = hashrate_estimate * 0.9 + ? * 0.1
-                    WHERE address = ?
+                        last_seen = ?
+                    WHERE canonical_name = ?
                     """,
-                    (1 if is_block else 0, now, difficulty, address),
+                    (1 if is_block else 0, now, key),
                 )
                 self._conn.execute(
                     """
@@ -117,10 +225,45 @@ class PoolDatabase:
                 )
             else:
                 self._conn.execute(
-                    "UPDATE miners SET shares_invalid = shares_invalid + 1, last_seen = ? WHERE address = ?",
-                    (now, address),
+                    """
+                    UPDATE miners SET
+                        shares_invalid = shares_invalid + 1,
+                        last_seen = ?
+                    WHERE canonical_name = ?
+                    """,
+                    (now, key),
                 )
             self._conn.commit()
+
+    def record_metrics(self, canonical_name: str, solver_nps: float) -> None:
+        if solver_nps <= 0 or not canonical_name:
+            return
+        now = time.time()
+        with self._lock:
+            self._conn.execute(
+                """
+                UPDATE miners SET
+                    hashrate_estimate = hashrate_estimate * 0.7 + ? * 0.3,
+                    metrics_updated_at = ?,
+                    last_seen = ?
+                WHERE canonical_name = ?
+                """,
+                (solver_nps, now, now, canonical_name),
+            )
+            self._conn.commit()
+
+    def active_hashrate_sum(self, max_age_sec: float = 300.0) -> float:
+        cutoff = time.time() - max_age_sec
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT COALESCE(SUM(hashrate_estimate), 0) AS h
+                FROM miners
+                WHERE metrics_updated_at > ? AND hashrate_estimate > 0
+                """,
+                (cutoff,),
+            ).fetchone()
+            return float(row["h"])
 
     def record_block(
         self, height: int, finder_address: str, reward_sats: int, block_hash: str = ""
@@ -157,9 +300,9 @@ class PoolDatabase:
         with self._lock:
             rows = self._conn.execute(
                 """
-                SELECT address, worker_name, canonical_name, last_seen,
+                SELECT canonical_name, address, worker_name, last_seen,
                        difficulty, shares_valid, shares_invalid, blocks_found,
-                       hashrate_estimate
+                       hashrate_estimate, metrics_updated_at
                 FROM miners ORDER BY shares_valid DESC
                 """
             ).fetchall()
@@ -194,16 +337,13 @@ class PoolDatabase:
             invalid = self._conn.execute(
                 "SELECT COALESCE(SUM(shares_invalid), 0) AS c FROM miners"
             ).fetchone()["c"]
-            pool_hashrate = self._conn.execute(
-                "SELECT COALESCE(SUM(hashrate_estimate), 0) AS h FROM miners"
-            ).fetchone()["h"]
             return {
                 "miners": miners,
                 "shares": shares["c"],
                 "total_work": shares["work"],
                 "blocks": blocks,
                 "rejected_shares": invalid,
-                "miner_hashrate_sum": pool_hashrate,
+                "miner_hashrate_sum": self.active_hashrate_sum(),
             }
 
     def work_window(self, window_sec: float) -> dict[str, Any]:
@@ -221,3 +361,42 @@ class PoolDatabase:
                 "work": float(row["work"]),
                 "window_sec": window_sec,
             }
+
+    def last_block(self) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT height, hash, finder_address, reward_sats, created_at
+                FROM blocks ORDER BY id DESC LIMIT 1
+                """
+            ).fetchone()
+            return dict(row) if row else None
+
+    def work_since(self, since_ts: float) -> dict[str, Any]:
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT COUNT(*) AS shares, COALESCE(SUM(difficulty), 0) AS work
+                FROM shares WHERE created_at > ?
+                """,
+                (since_ts,),
+            ).fetchone()
+            return {
+                "shares": int(row["shares"]),
+                "work": float(row["work"]),
+            }
+
+    def round_start_time(self) -> float:
+        """Start of the current mining round (last pool block or first share)."""
+        with self._lock:
+            block = self._conn.execute(
+                "SELECT created_at FROM blocks ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            if block:
+                return float(block["created_at"])
+            row = self._conn.execute(
+                "SELECT MIN(created_at) AS t FROM shares"
+            ).fetchone()
+            if row and row["t"]:
+                return float(row["t"])
+            return time.time()
