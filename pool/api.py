@@ -19,6 +19,7 @@ from pool.stats import (
     build_dashboard_stats,
     build_mining_context,
     format_hashrate,
+    shares_to_matmul_hashrate,
 )
 
 
@@ -140,8 +141,26 @@ def create_app(
     @app.get("/api/miners")
     def miners():
         rows = db.list_miners()
+        pool_diff = float(jobs.difficulty)
         for row in rows:
-            row["hashrate"] = format_hashrate(float(row.get("hashrate_estimate") or 0))
+            work_10m = db.worker_work_window(
+                row["address"], row["worker_name"], 600.0
+            )
+            share_hs = shares_to_matmul_hashrate(
+                work_10m["work"], work_10m["window_sec"], pool_diff
+            )
+            metric_hs = float(row.get("hashrate_estimate") or 0)
+            if share_hs > 0 and metric_hs > 0:
+                ratio = metric_hs / share_hs
+                hs = metric_hs if 0.2 <= ratio <= 5.0 else share_hs
+            elif share_hs > 0:
+                hs = share_hs
+            else:
+                hs = metric_hs
+            row["hashrate"] = format_hashrate(hs)
+            row["hashrate_share_10m"] = format_hashrate(share_hs)
+            if metric_hs > 0 and (share_hs <= 0 or metric_hs / max(share_hs, 1e-9) > 5.0):
+                row["hashrate_nonce_reported"] = format_hashrate(metric_hs)
         return {"miners": rows}
 
     @app.get("/api/shares")

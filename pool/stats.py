@@ -307,10 +307,19 @@ def build_dashboard_stats(
     pool_hash_10m = pool_hash_10m_shares
     pool_hash_1h = pool_hash_1h_shares
     pool_hash = pool_hash_10m if pool_work.get("shares_10m", 0) >= 3 else pool_hash_1h
+    hashrate_source = "shares"
 
+    # Miners often report raw nonce scan rate (N/s) as solver_nps, not matmul H/s.
+    # Prefer share-work estimates; only trust metrics when they agree (~5× band).
     if pool_hashrate_metrics > 0:
-        pool_hash = pool_hashrate_metrics
-        hashrate_source = "metrics"
+        if pool_hash > 0:
+            ratio = pool_hashrate_metrics / pool_hash
+            if 0.2 <= ratio <= 5.0:
+                pool_hash = pool_hashrate_metrics
+                hashrate_source = "metrics"
+        else:
+            pool_hash = pool_hashrate_metrics
+            hashrate_source = "metrics"
 
     net_block_time = block_time_seconds(net_diff, net_hash)
     pool_block_time = block_time_seconds(net_diff, pool_hash) if pool_hash > 0 else None

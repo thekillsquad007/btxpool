@@ -346,6 +346,25 @@ class PoolDatabase:
                 "miner_hashrate_sum": self.active_hashrate_sum(),
             }
 
+    def worker_work_window(
+        self, address: str, worker_name: str, window_sec: float
+    ) -> dict[str, Any]:
+        cutoff = time.time() - window_sec
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT COUNT(*) AS shares, COALESCE(SUM(difficulty), 0) AS work
+                FROM shares
+                WHERE created_at > ? AND address = ? AND worker_name = ?
+                """,
+                (cutoff, address, worker_name),
+            ).fetchone()
+            return {
+                "shares": int(row["shares"]),
+                "work": float(row["work"]),
+                "window_sec": window_sec,
+            }
+
     def work_window(self, window_sec: float) -> dict[str, Any]:
         cutoff = time.time() - window_sec
         with self._lock:
