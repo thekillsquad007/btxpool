@@ -85,3 +85,10 @@ class BtxRpcClient:
             err = body["error"]
             raise RpcError(err.get("code", -1), err.get("message", str(err)))
         return body.get("result")
+
+    def send_to_address(self, address: str, amount_btx: float) -> str:
+        result = self.call("sendtoaddress", [address, amount_btx], timeout=120.0)
+        return str(result)
+
+    def get_wallet_balance(self) -> float:
+        return float(self.call("getbalance", [], timeout=30.0) or 0)

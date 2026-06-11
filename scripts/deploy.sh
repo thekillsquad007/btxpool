@@ -9,6 +9,8 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 POOL_ADDRESS=""
+DEV_ADDRESS="btx1z0069dewdztkwnrxx97lt9c5paynh0nynegqxq2kgykh0ct8xaggq0953gx"
+FEE_PERCENT="1.0"
 SOLVER_PATH=""
 RPC_URL="http://127.0.0.1:19334"
 RPC_USER=""
@@ -18,6 +20,8 @@ START=1
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --address|-a) POOL_ADDRESS="$2"; shift 2 ;;
+    --dev-address) DEV_ADDRESS="$2"; shift 2 ;;
+    --fee-percent) FEE_PERCENT="$2"; shift 2 ;;
     --solver-path|-s) SOLVER_PATH="$2"; shift 2 ;;
     --rpc-url) RPC_URL="$2"; shift 2 ;;
     --rpc-user) RPC_USER="$2"; shift 2 ;;
@@ -82,6 +86,12 @@ fi
 
 cat >> config.yaml <<EOF
 pool_address: "$POOL_ADDRESS"
+payment_mode: "pplns"
+pool_fee_percent: $FEE_PERCENT
+dev_fee_address: "$DEV_ADDRESS"
+payout_interval_hours: 24
+min_payout_sats: 500000000
+payout_enabled: true
 default_difficulty: 0.001
 solver_path: "$SOLVER_PATH"
 solver_backend: "cpu"

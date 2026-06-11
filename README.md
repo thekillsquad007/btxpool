@@ -1,33 +1,38 @@
 # BTX Pool
 
-Self-hosted mining pool for [BTX](https://github.com/btxchain/btx) (MatMul PoW). Connect all your rigs through a single Stratum endpoint, compatible with the [amdbtx](https://github.com/thekillsquad007/amdbtx) AMD GPU miner.
+Production-ready self-hosted mining pool for [BTX](https://github.com/btxchain/btx) (MatMul PoW). **PPLNS** payouts, per-wallet worker dashboard, and Stratum compatible with [amdbtx](https://github.com/thekillsquad007/amdbtx) (AMD) and [btx-nvidia-miner](https://github.com/thekillsquad007/btx-nvidia-miner) (NVIDIA).
 
 ## Features
 
-- **Stratum v1** — `mining.subscribe`, `mining.authorize`, `mining.notify`, `mining.submit`, `mining.set_difficulty`, `mining.set_canonical_name`
-- **MatMul jobs** — seeds, epsilon_bits, share targets (amdbtx `pre_hash_block_tier_v18` protocol)
-- **btxd integration** — `getblocktemplate`, `getmatmulchallenge`, `submitblock`
-- **Web dashboard** — live miners, shares, blocks, connection instructions
-- **SQLite stats** — per-miner share tracking
+- **PPLNS payments** — rewards split by share work in the last N difficulty window
+- **1% pool fee** (configurable) — retained by operator; credited miners receive 99%
+- **Automatic payouts** — every 24 hours by default, minimum **5 BTX**
+- **Per-wallet dashboard** — `/wallet/btx1z...` shows balance, workers, credits, payout history
+- **Stratum v1** — `mining.subscribe`, `mining.authorize`, `mining.notify`, `mining.submit`, `mining.set_difficulty`
+- **MatMul jobs** — seeds, epsilon_bits, share targets (amdbtx protocol)
+- **btxd integration** — `getblocktemplate`, `getmatmulchallenge`, `submitblock`, `sendtoaddress`
 - **Vardiff** — automatic per-miner difficulty tuning
+- **SQLite ledger** — shares, PPLNS rounds, balances, payouts
 
 ## Requirements
 
-1. **Synced BTX node** (`btxd` v0.32.3+) with RPC enabled
+1. **Synced BTX node** (`btxd` v0.32.3+) with RPC **and wallet** enabled
 2. **Python 3.10+**
 3. **CPU solver** for share verification (build once from amdbtx)
-4. **Node.js 18+** (only to build the frontend)
+4. **Node.js 18+** (to build the frontend)
 
 ## Quick start
 
-### 1. Wait for btxd to sync
+### 1. Set up btxd with wallet
 
 ```bash
-btx-cli getblockchaininfo
+bash scripts/setup-btxd-wallet.sh btx1zYOUR_POOL_ADDRESS
+btxd -datadir=~/.btx -daemon
+btx-cli -datadir=~/.btx getblockchaininfo
 # "initialblockdownload": false  →  ready to mine
 ```
 
-Ensure `server=1` in `~/.btx/btx.conf` and RPC is reachable.
+Ensure `server=1` in `~/.btx/btx.conf`. The pool hot wallet (`pool_address`) must be importable in the node wallet for payouts.
 
 ### 2. Build the CPU solver (pool server)
 
@@ -38,95 +43,112 @@ bash build_solver.sh
 # Binary: amdbtx-private-solver/build/btx-gbt-solve-hip
 ```
 
-The pool uses `--backend cpu` for share verification (no GPU required on the pool host).
-
 ### 3. Configure the pool
 
 ```bash
 cd btxpool
 cp config.example.yaml config.yaml
-# Edit pool_address, rpc credentials, solver_path
+# Edit pool_address, dev_fee_address, rpc credentials, solver_path
 ```
+
+Key payment settings:
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `payment_mode` | `pplns` | Payment scheme |
+| `pool_fee_percent` | `1.0` | Fee deducted from block rewards before PPLNS |
+| `dev_fee_address` | — | Operator fee address (can match `pool_address`) |
+| `payout_interval_hours` | `24` | Hours between payout runs |
+| `min_payout_sats` | `500000000` | Minimum payout (5 BTX) |
+| `coinbase_maturity` | `100` | Confirmations before balance is payable |
 
 ### 4. Install and run
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -e .
+pip install -e ".[dev]"
 
-# Build dashboard (optional — API works without it)
 cd frontend && npm install && npm run build && cd ..
 
-# Start pool (Stratum :3333, API/dashboard :8080)
 btxpool -c config.yaml
 ```
 
+Stratum **:3333**, dashboard **:8080**.
+
 ### 5. Connect miners
+
+Miners authorize with their **payout wallet** as the Stratum username. Worker name is optional (`address.worker`).
 
 **amdbtx** (`~/.amdbtx-miner/config.yaml`):
 
 ```yaml
 mining_mode: "pool"
-pool_host: "192.168.1.100"   # your pool server IP
+pool_host: "192.168.1.100"
 pool_port: 3333
 payout_address: "btx1z...YOUR_ADDRESS"
 worker_name: "rig-1"
 ```
 
-Or point any Stratum client at `stratum+tcp://YOUR_IP:3333` with username = your `btx1z...` address.
+**btx-nvidia-miner**:
 
-Open **http://YOUR_IP:8080** for the dashboard.
+```bash
+btx-miner --pool stratum+tcp://192.168.1.100:3333 \
+  --user btx1z...YOUR_ADDRESS.rig01 --pass x --devices all
+```
+
+### 6. Miner wallet dashboard
+
+Open **http://YOUR_IP:8080** and enter your `btx1z...` address, or go directly to:
+
+**http://YOUR_IP:8080/wallet/btx1z...YOUR_ADDRESS**
+
+Shows payable balance, immature credits, workers, PPLNS history, and payouts.
+
+## How PPLNS works
+
+1. Block found → pool submits to `btxd`, reward lands in `pool_address`
+2. PPLNS engine walks recent shares until window work ≥ `network_difficulty × multiplier`
+3. Each wallet receives `(share_work / window_work) × reward × (1 - fee%)`
+4. Credits start **immature** until `coinbase_maturity` confirmations
+5. Mature balance is paid on the 24h schedule if ≥ 5 BTX
 
 ## Architecture
 
 ```
-┌─────────────┐     Stratum :3333     ┌──────────────┐     RPC      ┌──────┐
-│  amdbtx     │ ────────────────────► │   btxpool    │ ───────────► │ btxd │
-│  (GPU rigs) │                       │  Stratum+API │              └──────┘
-└─────────────┘                       └──────────────┘
-                                            │
-                                      HTTP :8080
-                                            ▼
-                                      Dashboard
+┌──────────────┐   Stratum :3333   ┌──────────────┐    RPC     ┌──────┐
+│ amdbtx       │ ────────────────► │   btxpool    │ ─────────► │ btxd │
+│ btx-nvidia   │                   │ PPLNS+payout │  (wallet)  └──────┘
+└──────────────┘                   └──────────────┘
+                                         │ HTTP :8080
+                                         ▼
+                                   Pool + wallet UI
 ```
-
-- Pool builds block templates with coinbase paid to `pool_address`
-- Miners authorize with their payout address (tracked for stats)
-- Shares verified by recomputing MatMul digest via CPU solver
-- Blocks submitted via `submitblock` when a share meets network difficulty
-
-## Configuration reference
-
-| Key | Default | Description |
-|-----|---------|-------------|
-| `pool_address` | — | BTX address receiving block rewards |
-| `stratum_port` | 3333 | Stratum listen port |
-| `api_port` | 8080 | Dashboard + REST API |
-| `default_difficulty` | 0.01 | Initial share difficulty |
-| `solver_path` | — | Path to `btx-gbt-solve-hip` binary |
-| `solver_backend` | cpu | Solver backend for verification |
-
-Environment overrides: `BTXPOOL_POOL_ADDRESS`, `BTXPOOL_CONFIG`, etc.
 
 ## API endpoints
 
 | Endpoint | Description |
 |----------|-------------|
-| `GET /api/pool` | Pool + chain status |
-| `GET /api/miners` | Connected miners |
-| `GET /api/shares` | Recent accepted shares |
-| `GET /api/blocks` | Blocks found by pool |
-| `GET /api/job` | Current mining job |
+| `GET /api/pool` | Pool + chain + payment settings |
+| `GET /api/miners` | All workers |
+| `GET /api/wallet/{address}` | Per-wallet balance, workers, credits |
+| `GET /api/payouts` | Payout history (`?address=`) |
+| `GET /api/rounds` | PPLNS rounds |
+| `GET /api/shares` | Recent shares |
+| `GET /api/blocks` | Blocks found |
 
-## Development
+## Testing payouts
+
+Set `payout_dry_run: true` in `config.yaml` to simulate payouts without sending coins.
 
 ```bash
-# Frontend dev server (proxies API to :8080)
-cd frontend && npm run dev
+pytest tests/
+```
 
-# Pool in another terminal
-btxpool -c config.yaml
+## One-shot deploy
+
+```bash
+bash scripts/deploy.sh --address btx1z...YOUR_ADDRESS --fee-percent 1
 ```
 
 ## License

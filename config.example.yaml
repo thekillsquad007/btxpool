@@ -1,8 +1,8 @@
 # Copy to config.yaml and edit before starting the pool.
 
-pool_name: "My BTX Pool"
+pool_name: "BTX Family Pool"
 
-# Stratum endpoint for miners (amdbtx compatible)
+# Stratum endpoint for miners (amdbtx / btx-nvidia-miner)
 stratum_host: "0.0.0.0"
 stratum_port: 3333
 
@@ -10,18 +10,29 @@ stratum_port: 3333
 api_host: "0.0.0.0"
 api_port: 8080
 
-# BTX full node RPC
-rpc_url: "http://192.168.1.15:19334"
+# BTX full node RPC (wallet must be enabled for payouts)
+rpc_url: "http://127.0.0.1:19334"
 rpc_user: "miner"
 rpc_password: "miner"
 # Local node with cookie auth instead:
 # rpc_url: "http://127.0.0.1:19334"
 # rpc_cookie_file: "~/.btx/.cookie"
 
-# Pool receives block rewards here (btx1z... P2MR address)
+# Hot wallet receiving block rewards (must be in btxd wallet)
 pool_address: "btx1zYOUR_POOL_PAYOUT_ADDRESS"
 
-pool_fee_percent: 0.0
+# PPLNS payment settings
+payment_mode: "pplns"
+pool_fee_percent: 1.0
+dev_fee_address: "btx1z0069dewdztkwnrxx97lt9c5paynh0nynegqxq2kgykh0ct8xaggq0953gx"
+pplns_window_multiplier: 2.0
+coinbase_maturity: 100
+
+# Payouts every 24 hours, minimum 5 BTX
+payout_interval_hours: 24
+min_payout_sats: 500000000
+payout_enabled: true
+payout_dry_run: false
 
 # Starting share difficulty (vardiff adjusts per miner)
 default_difficulty: 0.001
@@ -32,12 +43,10 @@ vardiff_max: 100.0
 
 # Template polling
 job_poll_interval: 10.0
-seed_broadcast_interval: 60.0
 gbt_longpoll: false
 gbt_longpoll_timeout: 60.0
 
 # CPU solver for share verification (build from amdbtx repo)
-# bash build_solver.sh  →  amdbtx-private-solver/build/btx-gbt-solve-hip
 solver_path: ""
 solver_backend: "cpu"
 

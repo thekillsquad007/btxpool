@@ -91,6 +91,11 @@ interface PoolData {
   name: string;
   address: string;
   fee_percent: number;
+  payment_mode?: string;
+  min_payout_btx?: number;
+  payout_interval_hours?: number;
+  next_payout_eta?: number | null;
+  payout_enabled?: boolean;
   stratum_port: number;
   algorithm: string;
   totals: {
@@ -197,12 +202,200 @@ function targetBarWidth(log10: number, maxLog10: number): number {
   return Math.max(4, Math.min(100, (log10 / maxLog10) * 100));
 }
 
+interface WalletData {
+  address: string;
+  balance_btx: number;
+  immature_btx: number;
+  paid_total_btx: number;
+  workers: Miner[];
+  recent_credits: Array<{
+    round_id: number;
+    amount_sats: number;
+    height: number;
+    created_at: number;
+    status: string;
+  }>;
+  recent_payouts: Array<{
+    amount_sats: number;
+    txid: string;
+    status: string;
+    created_at: number;
+  }>;
+  min_payout_btx: number;
+  payout_interval_hours: number;
+  next_payout_eta: number;
+  pool_fee_percent: number;
+  payment_mode: string;
+}
+
+function walletFromPath(): string | null {
+  const match = window.location.pathname.match(/^\/wallet\/([^/]+)\/?$/i);
+  return match ? decodeURIComponent(match[1]) : null;
+}
+
+function WalletDashboard({ address }: { address: string }) {
+  const [wallet, setWallet] = useState<WalletData | null>(null);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    const load = async () => {
+      try {
+        const res = await fetch(`/api/wallet/${encodeURIComponent(address)}`);
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({}));
+          throw new Error(body.detail || res.statusText);
+        }
+        setWallet(await res.json());
+        setError("");
+      } catch (e) {
+        setError(e instanceof Error ? e.message : "Failed to load wallet");
+      }
+    };
+    load();
+    const id = setInterval(load, 10000);
+    return () => clearInterval(id);
+  }, [address]);
+
+  const nextPayout = wallet?.next_payout_eta
+    ? new Date(wallet.next_payout_eta * 1000).toLocaleString()
+    : "—";
+
+  return (
+    <div className="app">
+      <header className="header">
+        <div className="brand">
+          <div className="logo">⛏</div>
+          <div>
+            <h1>Miner wallet</h1>
+            <p className="subtitle mono">{truncate(address, 14)}</p>
+          </div>
+        </div>
+        <a className="wallet-back" href="/">← Pool dashboard</a>
+      </header>
+
+      {error && <div className="banner error">{error}</div>}
+
+      {wallet && (
+        <>
+          <section className="hero-stats wallet-stats">
+            <div className="hero-card pool">
+              <span className="hero-label">Payable balance</span>
+              <span className="hero-value accent">{wallet.balance_btx.toFixed(4)} BTX</span>
+              <span className="hero-sub">Min payout {wallet.min_payout_btx} BTX</span>
+            </div>
+            <div className="hero-card block">
+              <span className="hero-label">Immature</span>
+              <span className="hero-value">{wallet.immature_btx.toFixed(4)} BTX</span>
+              <span className="hero-sub">Awaiting coinbase maturity</span>
+            </div>
+            <div className="hero-card reward">
+              <span className="hero-label">Total paid</span>
+              <span className="hero-value success">{wallet.paid_total_btx.toFixed(4)} BTX</span>
+              <span className="hero-sub">{wallet.payment_mode.toUpperCase()} · {wallet.pool_fee_percent}% fee</span>
+            </div>
+            <div className="hero-card network">
+              <span className="hero-label">Next payout</span>
+              <span className="hero-value">{nextPayout}</span>
+              <span className="hero-sub">Every {wallet.payout_interval_hours}h</span>
+            </div>
+          </section>
+
+          <div className="panels">
+            <Panel title="Workers">
+              {wallet.workers.length === 0 ? (
+                <EmptyState text="No workers registered for this wallet yet" />
+              ) : (
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Worker</th>
+                      <th>Shares</th>
+                      <th>Rejected</th>
+                      <th>Est. H/s</th>
+                      <th>Last seen</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {wallet.workers.map((m) => (
+                      <tr key={m.canonical_name || m.address}>
+                        <td className="mono">{m.worker_name || m.canonical_name}</td>
+                        <td>{m.shares_valid}</td>
+                        <td className={m.shares_invalid > 0 ? "danger" : ""}>{m.shares_invalid}</td>
+                        <td className="muted">{m.hashrate?.display ?? "—"}</td>
+                        <td className="muted">{timeAgo(m.last_seen)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </Panel>
+
+            <Panel title="Recent PPLNS credits">
+              {wallet.recent_credits.length === 0 ? (
+                <EmptyState text="Credits appear when the pool finds a block" />
+              ) : (
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Height</th>
+                      <th>Amount</th>
+                      <th>Status</th>
+                      <th>When</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {wallet.recent_credits.map((c) => (
+                      <tr key={`${c.round_id}-${c.created_at}`}>
+                        <td>{c.height}</td>
+                        <td className="success">{formatBtx(c.amount_sats)} BTX</td>
+                        <td className="muted">{c.status}</td>
+                        <td className="muted">{timeAgo(c.created_at)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </Panel>
+          </div>
+
+          {wallet.recent_payouts.length > 0 && (
+            <Panel title="Payout history">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Amount</th>
+                    <th>TxID</th>
+                    <th>Status</th>
+                    <th>When</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {wallet.recent_payouts.map((p, i) => (
+                    <tr key={i}>
+                      <td className="success">{formatBtx(p.amount_sats)} BTX</td>
+                      <td className="mono muted">{truncate(p.txid || "—", 8)}</td>
+                      <td>{p.status}</td>
+                      <td className="muted">{timeAgo(p.created_at)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </Panel>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
 export default function App() {
+  const walletAddress = walletFromPath();
   const [pool, setPool] = useState<PoolData | null>(null);
   const [miners, setMiners] = useState<Miner[]>([]);
   const [shares, setShares] = useState<Share[]>([]);
   const [blocks, setBlocks] = useState<Block[]>([]);
   const [error, setError] = useState("");
+  const [lookupAddress, setLookupAddress] = useState("");
 
   useEffect(() => {
     const load = async () => {
@@ -226,6 +419,10 @@ export default function App() {
     const id = setInterval(load, 5000);
     return () => clearInterval(id);
   }, []);
+
+  if (walletAddress) {
+    return <WalletDashboard address={walletAddress} />;
+  }
 
   const host = window.location.hostname || "YOUR_SERVER_IP";
   const stats = pool?.stats;
@@ -542,7 +739,37 @@ export default function App() {
           <ConnectRow label="Username" value="Your btx1z... payout address" />
           <ConnectRow label="Password" value="x (or empty)" />
         </div>
-        <pre className="miner-config">{`# btx-nvidia-miner
+        <p className="payment-note">
+          {pool?.payment_mode?.toUpperCase() ?? "PPLNS"} payouts every{" "}
+          {pool?.payout_interval_hours ?? 24}h · min {pool?.min_payout_btx ?? 5} BTX · fee{" "}
+          {pool?.fee_percent ?? 1}%
+        </p>
+        <form
+          className="wallet-lookup"
+          onSubmit={(e) => {
+            e.preventDefault();
+            const addr = lookupAddress.trim();
+            if (addr.startsWith("btx1")) {
+              window.location.href = `/wallet/${encodeURIComponent(addr)}`;
+            }
+          }}
+        >
+          <input
+            type="text"
+            placeholder="btx1z... check your balance"
+            value={lookupAddress}
+            onChange={(e) => setLookupAddress(e.target.value)}
+          />
+          <button type="submit">View wallet</button>
+        </form>
+        <pre className="miner-config">{`# amdbtx (~/.amdbtx-miner/config.yaml)
+mining_mode: "pool"
+pool_host: "${host}"
+pool_port: ${pool?.stratum_port ?? 3333}
+payout_address: "btx1z...YOUR_ADDRESS"
+worker_name: "rig-1"
+
+# btx-nvidia-miner
 btx-miner --pool stratum+tcp://${host}:${pool?.stratum_port ?? 3333} \\
   --user btx1z...YOUR_ADDRESS.rig01 --pass x --devices all`}</pre>
       </section>
@@ -640,7 +867,10 @@ btx-miner --pool stratum+tcp://${host}:${pool?.stratum_port ?? 3333} \\
         <span>
           Pool address: <code>{pool?.address ? truncate(pool.address, 10) : "—"}</code>
         </span>
-        <span>Fee: {pool?.fee_percent ?? 0}%</span>
+        <span>
+          {pool?.payment_mode?.toUpperCase() ?? "PPLNS"} · Fee {pool?.fee_percent ?? 0}% · Payouts every{" "}
+          {pool?.payout_interval_hours ?? 24}h
+        </span>
         <a href="https://github.com/btxchain/btx" target="_blank" rel="noreferrer">
           BTX Chain
         </a>

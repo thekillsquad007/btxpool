@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .block_builder import compute_template_merkle_root
+from .pplns import pool_fee_bps
 from .btx_rpc import BtxRpcClient, RpcError
 from .difficulty import difficulty_to_share_target
 
@@ -89,6 +90,7 @@ class JobManager:
         self._current: PoolJob | None = None
         self._longpollid = ""
         self._pool_script: bytes | None = None
+        self._dev_script: bytes | None = None
         self._network_target = ""
         self._height = 0
         self._difficulty = float(cfg.get("default_difficulty", 0.01))
@@ -152,10 +154,10 @@ class JobManager:
                 "last_error": self._last_error,
             }
 
-    def resolve_pool_script(self) -> bytes:
-        if self._pool_script is not None:
-            return self._pool_script
-        address = self.cfg["pool_address"]
+    def _resolve_address_script(self, address: str, cache_attr: str) -> bytes:
+        cached = getattr(self, cache_attr, None)
+        if cached is not None:
+            return cached
         for method, params in (
             ("validateaddress", [address]),
             ("getaddressinfo", [address]),
@@ -164,12 +166,29 @@ class JobManager:
                 info = self.rpc.call(method, params, timeout=10.0)
                 spk = info.get("scriptPubKey")
                 if spk:
-                    self._pool_script = bytes.fromhex(spk)
-                    log.info("pool coinbase script resolved for %s", address[:16])
-                    return self._pool_script
+                    script = bytes.fromhex(spk)
+                    setattr(self, cache_attr, script)
+                    log.info("coinbase script resolved for %s", address[:16])
+                    return script
             except RpcError:
                 continue
-        raise RuntimeError(f"cannot resolve scriptPubKey for pool address {address}")
+        raise RuntimeError(f"cannot resolve scriptPubKey for address {address}")
+
+    def resolve_pool_script(self) -> bytes:
+        return self._resolve_address_script(self.cfg["pool_address"], "_pool_script")
+
+    def resolve_dev_script(self) -> bytes | None:
+        dev_address = (self.cfg.get("dev_fee_address") or "").strip()
+        pool_address = self.cfg["pool_address"]
+        if not dev_address or dev_address == pool_address:
+            return None
+        return self._resolve_address_script(dev_address, "_dev_script")
+
+    def coinbase_dev_fee_bps(self) -> int:
+        """Basis points sent to dev address in coinbase when addresses differ."""
+        if not self.resolve_dev_script():
+            return 0
+        return pool_fee_bps(self.cfg)
 
     @staticmethod
     def _block_key(job: PoolJob) -> tuple:
@@ -213,7 +232,14 @@ class JobManager:
         seed_b = hc.get("seed_b", matmul.get("seed_b", gbt.get("seed_b", "0" * 64)))
 
         payout_script = self.resolve_pool_script()
-        merkle_root = compute_template_merkle_root(gbt, payout_script)
+        dev_script = self.resolve_dev_script()
+        dev_fee_bps = self.coinbase_dev_fee_bps()
+        merkle_root = compute_template_merkle_root(
+            gbt,
+            payout_script,
+            dev_script=dev_script,
+            dev_fee_bps=dev_fee_bps,
+        )
 
         job_id = f"btx-{height}-{secrets.token_hex(4)}"
         share_target = difficulty_to_share_target(self._difficulty, block_target or None)

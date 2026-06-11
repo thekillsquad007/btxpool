@@ -353,3 +353,11 @@ def assemble_block_hex(
     for raw in tx_raw_list:
         block += raw
     return block.hex()
+
+
+def block_hash_from_hex(block_hex: str) -> str:
+    """Return display-order block hash from serialized block hex."""
+    raw = bytes.fromhex(block_hex)
+    if len(raw) < 80:
+        raise ValueError("block too short for header")
+    return uint256_to_display_hex(sha256d(raw[:80]))

@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import re
+import time
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -22,6 +24,21 @@ from pool.stats import (
     shares_to_matmul_hashrate,
 )
 
+SATS_PER_BTX = 100_000_000
+WALLET_ADDRESS_RE = re.compile(r"^btx1[a-z0-9]{50,120}$", re.IGNORECASE)
+
+
+def _next_payout_eta(cfg: dict[str, Any], db: PoolDatabase) -> float | None:
+    last = db.get_stat("last_payout_at", "")
+    if not last:
+        return None
+    try:
+        last_ts = float(last)
+    except ValueError:
+        return None
+    interval = float(cfg.get("payout_interval_hours", 24)) * 3600.0
+    return last_ts + interval
+
 
 def create_app(
     cfg: dict[str, Any],
@@ -29,6 +46,7 @@ def create_app(
     jobs: JobManager,
     stratum_sessions: callable,
     network: NetworkMonitor | None = None,
+    payouts=None,
 ) -> FastAPI:
     app = FastAPI(title=cfg.get("pool_name", "BTX Pool"), version="0.1.0")
     app.add_middleware(
@@ -118,10 +136,17 @@ def create_app(
             round_work=round_stats["work"],
             last_block=last_block_info,
         )
+        next_payout = _next_payout_eta(cfg, db)
         return {
             "name": cfg.get("pool_name", "BTX Pool"),
             "address": cfg.get("pool_address", ""),
             "fee_percent": cfg.get("pool_fee_percent", 0),
+            "dev_fee_address": cfg.get("dev_fee_address", ""),
+            "payment_mode": cfg.get("payment_mode", "pplns"),
+            "min_payout_btx": int(cfg.get("min_payout_sats", 500_000_000)) / SATS_PER_BTX,
+            "payout_interval_hours": cfg.get("payout_interval_hours", 24),
+            "next_payout_eta": next_payout,
+            "payout_enabled": bool(cfg.get("payout_enabled", True)),
             "stratum_port": cfg.get("stratum_port", 3333),
             "algorithm": algorithm,
             "totals": totals,
@@ -170,6 +195,63 @@ def create_app(
     @app.get("/api/blocks")
     def blocks(limit: int = 20):
         return {"blocks": db.recent_blocks(limit)}
+
+    @app.get("/api/rounds")
+    def rounds(limit: int = 20):
+        return {"rounds": db.recent_rounds(limit)}
+
+    @app.get("/api/payouts")
+    def payout_history(address: str | None = None, limit: int = 50):
+        return {"payouts": db.recent_payouts(address=address, limit=limit)}
+
+    @app.get("/api/wallet/{address}")
+    def wallet_dashboard(address: str):
+        if not WALLET_ADDRESS_RE.match(address):
+            raise HTTPException(status_code=400, detail="Invalid BTX wallet address")
+        balance = db.get_balance(address)
+        workers = db.miners_for_address(address)
+        pool_diff = float(jobs.difficulty)
+        for row in workers:
+            work_10m = db.worker_work_window(
+                row["address"], row["worker_name"], 600.0
+            )
+            share_hs = shares_to_matmul_hashrate(
+                work_10m["work"], work_10m["window_sec"], pool_diff
+            )
+            metric_hs = float(row.get("hashrate_estimate") or 0)
+            if share_hs > 0 and metric_hs > 0:
+                ratio = metric_hs / share_hs
+                hs = metric_hs if 0.2 <= ratio <= 5.0 else share_hs
+            elif share_hs > 0:
+                hs = share_hs
+            else:
+                hs = metric_hs
+            row["hashrate"] = format_hashrate(hs)
+
+        immature = int(balance["immature_sats"]) if balance else 0
+        payable = int(balance["balance_sats"]) if balance else 0
+        paid_total = int(balance["paid_total_sats"]) if balance else 0
+        next_payout = _next_payout_eta(cfg, db)
+        if next_payout is None:
+            next_payout = time.time() + float(cfg.get("payout_interval_hours", 24)) * 3600.0
+
+        return {
+            "address": address,
+            "balance_sats": payable,
+            "balance_btx": payable / SATS_PER_BTX,
+            "immature_sats": immature,
+            "immature_btx": immature / SATS_PER_BTX,
+            "paid_total_sats": paid_total,
+            "paid_total_btx": paid_total / SATS_PER_BTX,
+            "workers": workers,
+            "recent_credits": db.recent_credits_for_address(address, limit=20),
+            "recent_payouts": db.recent_payouts(address=address, limit=20),
+            "payment_mode": cfg.get("payment_mode", "pplns"),
+            "pool_fee_percent": cfg.get("pool_fee_percent", 0),
+            "min_payout_btx": int(cfg.get("min_payout_sats", 500_000_000)) / SATS_PER_BTX,
+            "payout_interval_hours": cfg.get("payout_interval_hours", 24),
+            "next_payout_eta": next_payout,
+        }
 
     @app.get("/api/job")
     def current_job():

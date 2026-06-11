@@ -17,6 +17,8 @@ from pool.config import load_config
 from pool.database import PoolDatabase
 from pool.job_manager import JobManager
 from pool.network_monitor import NetworkMonitor
+from pool.payouts import PayoutWorker
+from pool.pplns import PplnsEngine
 from pool.share_validator import ShareValidator
 from pool.stratum.server import StratumServer
 
@@ -53,8 +55,36 @@ async def run_pool(cfg: dict) -> None:
             "btx-gbt-solve (build from https://github.com/thekillsquad007/amdbtx)"
         )
 
-    stratum = StratumServer(cfg, jobs, db, validator, rpc)
+    pplns = PplnsEngine(db, cfg, rpc)
+    payouts = PayoutWorker(db, rpc, cfg)
+
+    def network_difficulty() -> float:
+        snap = network.snapshot()
+        return float(snap.get("difficulty") or 0)
+
+    stratum = StratumServer(
+        cfg,
+        jobs,
+        db,
+        validator,
+        rpc,
+        pplns=pplns,
+        network_difficulty=network_difficulty,
+    )
     jobs.start()
+    payouts.start()
+
+    maturity_stop = threading.Event()
+
+    def maturity_loop():
+        while not maturity_stop.is_set():
+            try:
+                pplns.poll_maturity()
+            except Exception as e:
+                logging.getLogger(__name__).warning("maturity poll: %s", e)
+            maturity_stop.wait(60.0)
+
+    threading.Thread(target=maturity_loop, daemon=True, name="pplns-maturity").start()
 
     loop = asyncio.get_running_loop()
     job_event = threading.Event()
@@ -82,7 +112,7 @@ async def run_pool(cfg: dict) -> None:
     def session_count():
         return len(stratum._sessions)
 
-    app = create_app(cfg, db, jobs, session_count, network)
+    app = create_app(cfg, db, jobs, session_count, network, payouts)
     config = uvicorn.Config(
         app,
         host=cfg.get("api_host", "0.0.0.0"),
@@ -117,6 +147,8 @@ async def run_pool(cfg: dict) -> None:
     await stop.wait()
 
     job_event.set()
+    maturity_stop.set()
+    payouts.stop()
     jobs.stop()
     network.stop()
     await stratum.stop()

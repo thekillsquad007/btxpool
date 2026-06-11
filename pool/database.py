@@ -62,6 +62,51 @@ class PoolDatabase:
                     hash TEXT NOT NULL DEFAULT '',
                     finder_address TEXT NOT NULL,
                     reward_sats INTEGER NOT NULL DEFAULT 0,
+                    distributable_sats INTEGER NOT NULL DEFAULT 0,
+                    window_work REAL NOT NULL DEFAULT 0,
+                    status TEXT NOT NULL DEFAULT 'immature',
+                    confirmations INTEGER NOT NULL DEFAULT 0,
+                    created_at REAL NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS mining_rounds (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    block_id INTEGER NOT NULL,
+                    height INTEGER NOT NULL,
+                    block_hash TEXT NOT NULL DEFAULT '',
+                    reward_sats INTEGER NOT NULL DEFAULT 0,
+                    distributable_sats INTEGER NOT NULL DEFAULT 0,
+                    window_work REAL NOT NULL DEFAULT 0,
+                    status TEXT NOT NULL DEFAULT 'immature',
+                    confirmations INTEGER NOT NULL DEFAULT 0,
+                    credited_at REAL,
+                    created_at REAL NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS round_credits (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    round_id INTEGER NOT NULL,
+                    address TEXT NOT NULL,
+                    worker_name TEXT NOT NULL DEFAULT '',
+                    work REAL NOT NULL DEFAULT 0,
+                    amount_sats INTEGER NOT NULL DEFAULT 0
+                );
+
+                CREATE TABLE IF NOT EXISTS miner_balances (
+                    address TEXT PRIMARY KEY,
+                    immature_sats INTEGER NOT NULL DEFAULT 0,
+                    balance_sats INTEGER NOT NULL DEFAULT 0,
+                    paid_total_sats INTEGER NOT NULL DEFAULT 0,
+                    updated_at REAL NOT NULL DEFAULT 0
+                );
+
+                CREATE TABLE IF NOT EXISTS payouts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    address TEXT NOT NULL,
+                    amount_sats INTEGER NOT NULL DEFAULT 0,
+                    txid TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    error TEXT NOT NULL DEFAULT '',
                     created_at REAL NOT NULL
                 );
 
@@ -69,6 +114,10 @@ class PoolDatabase:
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL
                 );
+
+                CREATE INDEX IF NOT EXISTS idx_shares_created ON shares(created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_round_credits_address ON round_credits(address);
+                CREATE INDEX IF NOT EXISTS idx_payouts_address ON payouts(address);
             """)
             self._migrate_schema()
             self._conn.commit()
@@ -85,6 +134,19 @@ class PoolDatabase:
         address_col = cols.get("address")
         if address_col is not None and int(address_col["pk"]) == 1:
             self._migrate_miners_to_canonical_pk()
+
+        block_cols = {
+            row["name"]: row
+            for row in self._conn.execute("PRAGMA table_info(blocks)").fetchall()
+        }
+        for col, typedef in (
+            ("distributable_sats", "INTEGER NOT NULL DEFAULT 0"),
+            ("window_work", "REAL NOT NULL DEFAULT 0"),
+            ("status", "TEXT NOT NULL DEFAULT 'immature'"),
+            ("confirmations", "INTEGER NOT NULL DEFAULT 0"),
+        ):
+            if col not in block_cols:
+                self._conn.execute(f"ALTER TABLE blocks ADD COLUMN {col} {typedef}")
 
     def _migrate_miners_to_canonical_pk(self) -> None:
         self._conn.executescript("""
@@ -268,15 +330,356 @@ class PoolDatabase:
     def record_block(
         self, height: int, finder_address: str, reward_sats: int, block_hash: str = ""
     ) -> None:
+        self.record_block_pplns(
+            height=height,
+            block_hash=block_hash,
+            finder_address=finder_address,
+            reward_sats=reward_sats,
+            distributable_sats=reward_sats,
+            window_work=0,
+            status="immature",
+        )
+
+    def record_block_pplns(
+        self,
+        *,
+        height: int,
+        block_hash: str,
+        finder_address: str,
+        reward_sats: int,
+        distributable_sats: int,
+        window_work: float,
+        status: str = "immature",
+    ) -> int:
+        now = time.time()
+        with self._lock:
+            cur = self._conn.execute(
+                """
+                INSERT INTO blocks (
+                    height, hash, finder_address, reward_sats, distributable_sats,
+                    window_work, status, confirmations, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)
+                """,
+                (
+                    height,
+                    block_hash,
+                    finder_address,
+                    reward_sats,
+                    distributable_sats,
+                    window_work,
+                    status,
+                    now,
+                ),
+            )
+            self._conn.commit()
+            return int(cur.lastrowid)
+
+    def shares_for_pplns_window(self, target_work: float) -> list[dict[str, Any]]:
+        if target_work <= 0:
+            return []
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT address, worker_name, difficulty, created_at
+                FROM shares
+                ORDER BY id DESC
+                """
+            ).fetchall()
+        selected: list[dict[str, Any]] = []
+        total = 0.0
+        for row in rows:
+            selected.append(dict(row))
+            total += float(row["difficulty"])
+            if total >= target_work:
+                break
+        return selected
+
+    def create_mining_round(
+        self,
+        *,
+        block_id: int,
+        height: int,
+        block_hash: str,
+        reward_sats: int,
+        distributable_sats: int,
+        window_work: float,
+        status: str,
+        credits: list[dict[str, Any]],
+    ) -> int:
+        now = time.time()
+        with self._lock:
+            cur = self._conn.execute(
+                """
+                INSERT INTO mining_rounds (
+                    block_id, height, block_hash, reward_sats, distributable_sats,
+                    window_work, status, confirmations, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)
+                """,
+                (
+                    block_id,
+                    height,
+                    block_hash,
+                    reward_sats,
+                    distributable_sats,
+                    window_work,
+                    status,
+                    now,
+                ),
+            )
+            round_id = int(cur.lastrowid)
+            for credit in credits:
+                self._conn.execute(
+                    """
+                    INSERT INTO round_credits (
+                        round_id, address, worker_name, work, amount_sats
+                    )
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        round_id,
+                        credit["address"],
+                        credit.get("worker_name", ""),
+                        float(credit["work"]),
+                        int(credit["amount_sats"]),
+                    ),
+                )
+            self._conn.commit()
+            return round_id
+
+    def add_immature_credits(self, credits: dict[str, int]) -> None:
+        if not credits:
+            return
+        now = time.time()
+        with self._lock:
+            for address, amount in credits.items():
+                if amount <= 0:
+                    continue
+                self._conn.execute(
+                    """
+                    INSERT INTO miner_balances (address, immature_sats, balance_sats, paid_total_sats, updated_at)
+                    VALUES (?, ?, 0, 0, ?)
+                    ON CONFLICT(address) DO UPDATE SET
+                        immature_sats = immature_sats + excluded.immature_sats,
+                        updated_at = excluded.updated_at
+                    """,
+                    (address, amount, now),
+                )
+            self._conn.commit()
+
+    def rounds_pending_maturity(self) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT id, block_id, height, block_hash, status, confirmations
+                FROM mining_rounds
+                WHERE status != 'credited'
+                ORDER BY id ASC
+                """
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def update_round_confirmations(self, round_id: int, confirmations: int) -> None:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE mining_rounds SET confirmations = ? WHERE id = ?",
+                (confirmations, round_id),
+            )
+            row = self._conn.execute(
+                "SELECT block_id FROM mining_rounds WHERE id = ?", (round_id,)
+            ).fetchone()
+            if row:
+                self._conn.execute(
+                    "UPDATE blocks SET confirmations = ? WHERE id = ?",
+                    (confirmations, row["block_id"]),
+                )
+            self._conn.commit()
+
+    def update_round_block_hash(self, round_id: int, block_hash: str) -> None:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE mining_rounds SET block_hash = ? WHERE id = ?",
+                (block_hash, round_id),
+            )
+            row = self._conn.execute(
+                "SELECT block_id FROM mining_rounds WHERE id = ?", (round_id,)
+            ).fetchone()
+            if row:
+                self._conn.execute(
+                    "UPDATE blocks SET hash = ? WHERE id = ?",
+                    (block_hash, row["block_id"]),
+                )
+            self._conn.commit()
+
+    def mature_round(self, round_id: int) -> int:
+        now = time.time()
+        with self._lock:
+            credits = self._conn.execute(
+                """
+                SELECT address, SUM(amount_sats) AS amount
+                FROM round_credits
+                WHERE round_id = ?
+                GROUP BY address
+                """,
+                (round_id,),
+            ).fetchall()
+            if not credits:
+                return 0
+            for row in credits:
+                amount = int(row["amount"])
+                if amount <= 0:
+                    continue
+                self._conn.execute(
+                    """
+                    UPDATE miner_balances SET
+                        immature_sats = MAX(0, immature_sats - ?),
+                        balance_sats = balance_sats + ?,
+                        updated_at = ?
+                    WHERE address = ?
+                    """,
+                    (amount, amount, now, row["address"]),
+                )
+            self._conn.execute(
+                """
+                UPDATE mining_rounds SET status = 'credited', credited_at = ?
+                WHERE id = ?
+                """,
+                (now, round_id),
+            )
+            block_row = self._conn.execute(
+                "SELECT block_id FROM mining_rounds WHERE id = ?", (round_id,)
+            ).fetchone()
+            if block_row:
+                self._conn.execute(
+                    "UPDATE blocks SET status = 'credited' WHERE id = ?",
+                    (block_row["block_id"],),
+                )
+            self._conn.commit()
+            return len(credits)
+
+    def balances_ready_for_payout(self, min_sats: int) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT address, balance_sats, immature_sats, paid_total_sats
+                FROM miner_balances
+                WHERE balance_sats >= ?
+                ORDER BY balance_sats DESC
+                """,
+                (min_sats,),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def record_payout(
+        self,
+        *,
+        address: str,
+        amount_sats: int,
+        txid: str,
+        status: str,
+        error: str = "",
+    ) -> int:
+        with self._lock:
+            cur = self._conn.execute(
+                """
+                INSERT INTO payouts (address, amount_sats, txid, status, error, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (address, amount_sats, txid, status, error, time.time()),
+            )
+            self._conn.commit()
+            return int(cur.lastrowid)
+
+    def debit_balance(self, address: str, amount_sats: int, payout_id: int = 0) -> None:
+        now = time.time()
         with self._lock:
             self._conn.execute(
                 """
-                INSERT INTO blocks (height, hash, finder_address, reward_sats, created_at)
-                VALUES (?, ?, ?, ?, ?)
+                UPDATE miner_balances SET
+                    balance_sats = MAX(0, balance_sats - ?),
+                    paid_total_sats = paid_total_sats + ?,
+                    updated_at = ?
+                WHERE address = ?
                 """,
-                (height, block_hash, finder_address, reward_sats, time.time()),
+                (amount_sats, amount_sats, now, address),
             )
             self._conn.commit()
+
+    def get_balance(self, address: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT address, immature_sats, balance_sats, paid_total_sats, updated_at
+                FROM miner_balances WHERE address = ?
+                """,
+                (address,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def miners_for_address(self, address: str) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT canonical_name, address, worker_name, last_seen,
+                       difficulty, shares_valid, shares_invalid, blocks_found,
+                       hashrate_estimate, metrics_updated_at
+                FROM miners
+                WHERE address = ?
+                ORDER BY shares_valid DESC
+                """,
+                (address,),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def recent_credits_for_address(self, address: str, limit: int = 20) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT rc.round_id, rc.work, rc.amount_sats, rc.worker_name,
+                       mr.height, mr.block_hash, mr.created_at, mr.status
+                FROM round_credits rc
+                JOIN mining_rounds mr ON mr.id = rc.round_id
+                WHERE rc.address = ?
+                ORDER BY rc.id DESC
+                LIMIT ?
+                """,
+                (address, limit),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def recent_payouts(self, address: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
+        with self._lock:
+            if address:
+                rows = self._conn.execute(
+                    """
+                    SELECT id, address, amount_sats, txid, status, error, created_at
+                    FROM payouts WHERE address = ?
+                    ORDER BY id DESC LIMIT ?
+                    """,
+                    (address, limit),
+                ).fetchall()
+            else:
+                rows = self._conn.execute(
+                    """
+                    SELECT id, address, amount_sats, txid, status, error, created_at
+                    FROM payouts ORDER BY id DESC LIMIT ?
+                    """,
+                    (limit,),
+                ).fetchall()
+            return [dict(r) for r in rows]
+
+    def recent_rounds(self, limit: int = 20) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT id, height, block_hash, reward_sats, distributable_sats,
+                       window_work, status, confirmations, credited_at, created_at
+                FROM mining_rounds ORDER BY id DESC LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+            return [dict(r) for r in rows]
 
     def set_stat(self, key: str, value: str) -> None:
         with self._lock:

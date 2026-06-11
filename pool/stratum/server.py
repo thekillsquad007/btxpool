@@ -10,6 +10,7 @@ from typing import Any
 from pool.block_builder import assemble_block_hex
 from pool.database import PoolDatabase
 from pool.job_manager import JobManager, PoolJob
+from pool.pplns import PplnsEngine
 from pool.share_validator import ShareValidator
 from pool.stratum.session import StratumSession
 
@@ -24,12 +25,16 @@ class StratumServer:
         db: PoolDatabase,
         validator: ShareValidator,
         rpc,
+        pplns: PplnsEngine | None = None,
+        network_difficulty: callable | None = None,
     ):
         self.cfg = cfg
         self.jobs = jobs
         self.db = db
         self.validator = validator
         self.rpc = rpc
+        self.pplns = pplns
+        self._network_difficulty = network_difficulty or (lambda: 0.0)
         self.host = cfg.get("stratum_host", "0.0.0.0")
         self.port = int(cfg.get("stratum_port", 3333))
         self._sessions: set[StratumSession] = set()
@@ -210,6 +215,8 @@ class StratumServer:
 
         try:
             payout_script = self.jobs.resolve_pool_script()
+            dev_script = self.jobs.resolve_dev_script()
+            dev_fee_bps = self.jobs.coinbase_dev_fee_bps()
             submit_job = PoolJob(
                 job_id=job.job_id,
                 version=job.version,
@@ -234,6 +241,8 @@ class StratumServer:
                 nonce64,
                 digest,
                 payout_script,
+                dev_script=dev_script,
+                dev_fee_bps=dev_fee_bps,
             )
         except Exception as e:
             log.error("block assembly failed: %s", e)
@@ -250,11 +259,24 @@ class StratumServer:
 
         if result in (None, "null", ""):
             reward = int(job.gbt.get("coinbasevalue", 0))
-            self.db.record_block(job.block_height, finder, reward)
             log.info(
                 "BLOCK FOUND height=%d finder=%s reward=%d sats",
                 job.block_height, finder[:16], reward,
             )
+            if self.pplns and self.cfg.get("payment_mode", "pplns") == "pplns":
+                net_diff = float(self._network_difficulty())
+                await loop.run_in_executor(
+                    None,
+                    lambda: self.pplns.credit_block(
+                        height=job.block_height,
+                        finder_address=finder,
+                        reward_sats=reward,
+                        block_hex=block_hex,
+                        network_difficulty=net_diff,
+                    ),
+                )
+            else:
+                self.db.record_block(job.block_height, finder, reward)
             await loop.run_in_executor(None, lambda: self.jobs.refresh(clean=True))
         else:
             log.warning("submitblock rejected: %s", result)
