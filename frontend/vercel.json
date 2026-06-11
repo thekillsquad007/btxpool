@@ -1,0 +1,12 @@
+{
+  "rewrites": [
+    {
+      "source": "/wallet/:path*",
+      "destination": "/index.html"
+    },
+    {
+      "source": "/((?!assets/)(?!api/).*)",
+      "destination": "/index.html"
+    }
+  ]
+}

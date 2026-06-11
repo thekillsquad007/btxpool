@@ -5,7 +5,8 @@ set -euo pipefail
 
 POOL_ADDRESS="${1:-}"
 BTX_VERSION="${BTX_VERSION:-0.32.5}"
-INSTALL_DIR="${BTX_INSTALL_DIR:-$HOME/.btx}"
+# BTX default datadir on Linux is ~/.bitcoin (not ~/.btx)
+INSTALL_DIR="${BTX_INSTALL_DIR:-$HOME/.bitcoin}"
 CONF="$INSTALL_DIR/btx.conf"
 
 echo "=== BTX node setup (wallet enabled) ==="

@@ -25,10 +25,12 @@ Production-ready self-hosted mining pool for [BTX](https://github.com/btxchain/b
 
 ### 1. Set up btxd with wallet
 
+BTX stores chain data in **`~/.bitcoin`** by default.
+
 ```bash
 bash scripts/setup-btxd-wallet.sh btx1zYOUR_POOL_ADDRESS
-btxd -datadir=~/.btx -daemon
-btx-cli -datadir=~/.btx getblockchaininfo
+btxd -datadir=$HOME/.bitcoin -daemon
+btx-cli -datadir=$HOME/.bitcoin getblockchaininfo
 # "initialblockdownload": false  →  ready to mine
 ```
 
@@ -74,7 +76,7 @@ cd frontend && npm install && npm run build && cd ..
 btxpool -c config.yaml
 ```
 
-Stratum **:3333**, dashboard **:8080**.
+Stratum **:3333**, dashboard **:8080** (local), or **Vercel** for public dashboard — see [docs/VERCEL_DEPLOY.md](docs/VERCEL_DEPLOY.md).
 
 ### 5. Connect miners
 

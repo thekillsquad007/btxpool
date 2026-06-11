@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { apiUrl } from "./api";
 import "./App.css";
 
 interface HashrateDisplay {
@@ -240,7 +241,7 @@ function WalletDashboard({ address }: { address: string }) {
   useEffect(() => {
     const load = async () => {
       try {
-        const res = await fetch(`/api/wallet/${encodeURIComponent(address)}`);
+        const res = await fetch(apiUrl(`/api/wallet/${encodeURIComponent(address)}`));
         if (!res.ok) {
           const body = await res.json().catch(() => ({}));
           throw new Error(body.detail || res.statusText);
@@ -401,10 +402,10 @@ export default function App() {
     const load = async () => {
       try {
         const [p, m, s, b] = await Promise.all([
-          fetch("/api/pool").then((r) => r.json()),
-          fetch("/api/miners").then((r) => r.json()),
-          fetch("/api/shares?limit=20").then((r) => r.json()),
-          fetch("/api/blocks?limit=10").then((r) => r.json()),
+          fetch(apiUrl("/api/pool")).then((r) => r.json()),
+          fetch(apiUrl("/api/miners")).then((r) => r.json()),
+          fetch(apiUrl("/api/shares?limit=20")).then((r) => r.json()),
+          fetch(apiUrl("/api/blocks?limit=10")).then((r) => r.json()),
         ]);
         setPool(p);
         setMiners(m.miners);
