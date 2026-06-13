@@ -74,3 +74,33 @@ def test_block_summary_identifies_latest_pool_block(tmp_path):
     assert summary["orphaned"] == 0
     assert summary["latest"]["height"] == 321
     assert summary["latest"]["hash"] == "ab" * 32
+
+
+def test_best_share_tracks_distance_to_block_target(tmp_path):
+    db = PoolDatabase(str(tmp_path / "pool.db"))
+    db.upsert_miner("btx1test", "worker")
+    db.record_share(
+        "btx1test",
+        "worker",
+        "job",
+        "0001",
+        difficulty=1.0,
+        valid=True,
+        digest=f"{200:064x}",
+        block_target=f"{100:064x}",
+    )
+    db.record_share(
+        "btx1test",
+        "worker",
+        "job",
+        "0002",
+        difficulty=1.0,
+        valid=True,
+        digest=f"{125:064x}",
+        block_target=f"{100:064x}",
+    )
+
+    best = db.best_share()
+    assert best is not None
+    assert best["nonce64"] == "0002"
+    assert best["block_ratio"] == 0.8

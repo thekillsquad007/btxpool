@@ -59,6 +59,9 @@ class PoolDatabase:
                     nonce64 TEXT NOT NULL,
                     difficulty REAL NOT NULL,
                     work REAL NOT NULL DEFAULT 0,
+                    digest TEXT NOT NULL DEFAULT '',
+                    block_target TEXT NOT NULL DEFAULT '',
+                    block_ratio REAL NOT NULL DEFAULT 0,
                     is_block INTEGER NOT NULL DEFAULT 0,
                     created_at REAL NOT NULL
                 );
@@ -164,6 +167,13 @@ class PoolDatabase:
             self._conn.execute(
                 "ALTER TABLE shares ADD COLUMN work REAL NOT NULL DEFAULT 0"
             )
+        for col, typedef in (
+            ("digest", "TEXT NOT NULL DEFAULT ''"),
+            ("block_target", "TEXT NOT NULL DEFAULT ''"),
+            ("block_ratio", "REAL NOT NULL DEFAULT 0"),
+        ):
+            if col not in share_cols:
+                self._conn.execute(f"ALTER TABLE shares ADD COLUMN {col} {typedef}")
         for col, typedef in (
             ("distributable_sats", "INTEGER NOT NULL DEFAULT 0"),
             ("window_work", "REAL NOT NULL DEFAULT 0"),
@@ -307,9 +317,20 @@ class PoolDatabase:
         is_block: bool = False,
         canonical_name: str = "",
         work: float | None = None,
+        digest: str = "",
+        block_target: str = "",
     ) -> None:
         key = miner_canonical_name(address, worker_name, canonical_name)
         now = time.time()
+        block_ratio = 0.0
+        if digest and block_target:
+            try:
+                digest_value = int(digest, 16)
+                target_value = int(block_target, 16)
+                if digest_value > 0 and target_value > 0:
+                    block_ratio = target_value / digest_value
+            except ValueError:
+                block_ratio = 0.0
         with self._lock:
             if valid:
                 self._conn.execute(
@@ -326,9 +347,10 @@ class PoolDatabase:
                     """
                     INSERT INTO shares (
                         address, worker_name, job_id, nonce64,
-                        difficulty, work, is_block, created_at
+                        difficulty, work, digest, block_target, block_ratio,
+                        is_block, created_at
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         address,
@@ -337,10 +359,21 @@ class PoolDatabase:
                         nonce64,
                         difficulty,
                         float(difficulty if work is None else work),
+                        digest,
+                        block_target,
+                        block_ratio,
                         int(is_block),
                         now,
                     ),
                 )
+                if block_ratio > 0:
+                    self._conn.execute(
+                        """
+                        INSERT OR IGNORE INTO pool_stats(key, value)
+                        VALUES ('best_share_tracking_since', ?)
+                        """,
+                        (str(now),),
+                    )
             else:
                 self._conn.execute(
                     """
@@ -1097,12 +1130,33 @@ class PoolDatabase:
         with self._lock:
             rows = self._conn.execute(
                 """
-                SELECT address, worker_name, job_id, nonce64, difficulty, is_block, created_at
+                SELECT address, worker_name, job_id, nonce64, difficulty,
+                       digest, block_target, block_ratio, is_block, created_at
                 FROM shares ORDER BY id DESC LIMIT ?
                 """,
                 (limit,),
             ).fetchall()
             return [dict(r) for r in rows]
+
+    def best_share(self, since_ts: float | None = None) -> dict[str, Any] | None:
+        with self._lock:
+            where = "WHERE block_ratio > 0"
+            params: tuple[Any, ...] = ()
+            if since_ts is not None:
+                where += " AND created_at >= ?"
+                params = (since_ts,)
+            row = self._conn.execute(
+                f"""
+                SELECT address, worker_name, job_id, nonce64, difficulty,
+                       digest, block_target, block_ratio, is_block, created_at
+                FROM shares
+                {where}
+                ORDER BY block_ratio DESC, id DESC
+                LIMIT 1
+                """,
+                params,
+            ).fetchone()
+            return dict(row) if row else None
 
     def recent_blocks(self, limit: int = 20) -> list[dict[str, Any]]:
         with self._lock:

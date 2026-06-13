@@ -380,6 +380,8 @@ class StratumServer:
             address, worker_name, job_id, f"{nonce64:016x}", difficulty, True, is_block,
             canonical_name=canonical_name,
             work=share_work,
+            digest=str(verification.get("digest") or ""),
+            block_target=job.block_target,
         )
         log.info(
             "share accepted %s.%s job=%s%s",

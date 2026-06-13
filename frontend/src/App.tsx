@@ -121,6 +121,11 @@ interface PoolData {
     rejected_shares: number;
   };
   blocks?: BlockSummary;
+  best_shares?: {
+    round: Share | null;
+    all_time: Share | null;
+    tracking_since: number | null;
+  };
   chain: {
     synced: boolean;
     height: number;
@@ -173,6 +178,11 @@ interface Share {
   job_id: string;
   nonce64: string;
   difficulty: number;
+  digest?: string;
+  block_target?: string;
+  block_ratio?: number;
+  block_percent?: number;
+  times_above_target?: number | null;
   is_block: number;
   created_at: number;
 }
@@ -198,6 +208,22 @@ interface BlockSummary {
 
 function formatBtx(sats: number): string {
   return (sats / 1e8).toFixed(4);
+}
+
+function formatBlockCloseness(share: Share | null | undefined): string {
+  const percent = share?.block_percent ?? 0;
+  if (!percent) return "Tracking now";
+  if (percent >= 100) return "Block";
+  if (percent >= 10) return `${percent.toFixed(2)}%`;
+  if (percent >= 1) return `${percent.toFixed(3)}%`;
+  return `${percent.toPrecision(3)}%`;
+}
+
+function formatTargetDistance(share: Share | null | undefined): string {
+  const distance = share?.times_above_target;
+  if (!distance) return "No scored shares yet";
+  if (distance <= 1) return "Met the network target";
+  return `${distance.toLocaleString(undefined, { maximumFractionDigits: 2 })}x above target`;
 }
 
 function timeAgo(ts: number): string {
@@ -473,6 +499,8 @@ export default function App() {
   const latestBlock = blockSummary?.latest ?? pool?.blocks?.latest ?? null;
   const blocksFound =
     blockSummary?.total ?? pool?.blocks?.total ?? pool?.totals.blocks ?? 0;
+  const bestRoundShare = pool?.best_shares?.round;
+  const bestAllTimeShare = pool?.best_shares?.all_time;
 
   return (
     <div className={`app ${monitoringPath ? "monitoring-view" : "public-view"}`}>
@@ -641,6 +669,18 @@ export default function App() {
           <div>
             <span>Reward</span>
             <strong>{latestBlock ? `${formatBtx(latestBlock.reward_sats)} BTX` : "—"}</strong>
+          </div>
+          <div>
+            <span>Best this round</span>
+            <strong className={(bestRoundShare?.block_percent ?? 0) >= 10 ? "success" : ""}>
+              {formatBlockCloseness(bestRoundShare)}
+            </strong>
+            <small>{formatTargetDistance(bestRoundShare)}</small>
+          </div>
+          <div>
+            <span>Best tracked share</span>
+            <strong>{formatBlockCloseness(bestAllTimeShare)}</strong>
+            <small>{formatTargetDistance(bestAllTimeShare)}</small>
           </div>
         </div>
       </section>
@@ -977,6 +1017,7 @@ btx-miner --pool stratum+tcp://${host}:${pool?.stratum_port ?? 3333} \\
                   <th>Miner</th>
                   <th>Job</th>
                   <th>Diff</th>
+                  <th>Block score</th>
                   <th>Block?</th>
                   <th>When</th>
                 </tr>
@@ -987,6 +1028,9 @@ btx-miner --pool stratum+tcp://${host}:${pool?.stratum_port ?? 3333} \\
                     <td className="mono">{truncate(s.address, 6)}</td>
                     <td className="mono muted">{s.job_id.slice(0, 18)}...</td>
                     <td>{s.difficulty.toFixed(4)}</td>
+                    <td title={formatTargetDistance(s)}>
+                      {formatBlockCloseness(s)}
+                    </td>
                     <td className={s.is_block ? "success" : "muted"}>
                       {s.is_block ? "BLOCK" : "share"}
                     </td>

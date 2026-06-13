@@ -43,6 +43,16 @@ def _next_payout_eta(
     return last_ts + interval
 
 
+def _share_quality(row: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not row:
+        return None
+    ratio = float(row.get("block_ratio") or 0)
+    result = dict(row)
+    result["block_percent"] = ratio * 100.0
+    result["times_above_target"] = (1.0 / ratio) if ratio > 0 else None
+    return result
+
+
 def create_app(
     cfg: dict[str, Any],
     db: PoolDatabase,
@@ -84,6 +94,8 @@ def create_app(
         totals = db.totals()
         job_status = jobs.status()
         capacity = stratum_status() if stratum_status else {}
+        best_share = db.best_share()
+        best_ratio = float(best_share.get("block_ratio") or 0) if best_share else 0
         ready = 1 if job_status.get("synced") and jobs.current_job else 0
         lines = [
             "# HELP btxpool_ready Pool has a current mining job.",
@@ -116,6 +128,9 @@ def create_app(
             "# HELP btxpool_blocks_found_total Pool blocks found.",
             "# TYPE btxpool_blocks_found_total counter",
             f"btxpool_blocks_found_total {totals.get('blocks', 0)}",
+            "# HELP btxpool_best_share_block_ratio Best accepted share versus the network block target; 1 is a block.",
+            "# TYPE btxpool_best_share_block_ratio gauge",
+            f"btxpool_best_share_block_ratio {best_ratio}",
             "# HELP btxpool_unresolved_payouts Reserved or uncertain payouts.",
             "# TYPE btxpool_unresolved_payouts gauge",
             f"btxpool_unresolved_payouts {len(db.unresolved_payouts())}",
@@ -175,6 +190,8 @@ def create_app(
         net_diff = float(net.get("difficulty") or 0)
         round_start = db.round_start_time()
         round_stats = db.work_since(round_start)
+        best_share_round = _share_quality(db.best_share(round_start))
+        best_share_all_time = _share_quality(db.best_share())
         last_block_row = db.last_block()
         last_block_info = dict(last_block_row) if last_block_row else None
         if last_block_info and pool_hash_hs > 0 and net_diff > 0:
@@ -228,6 +245,14 @@ def create_app(
             "algorithm": algorithm,
             "totals": totals,
             "blocks": block_summary,
+            "best_shares": {
+                "round": best_share_round,
+                "all_time": best_share_all_time,
+                "tracking_since": (
+                    float(db.get_stat("best_share_tracking_since", "0") or 0)
+                    or None
+                ),
+            },
             "chain": {
                 **job_status,
                 "network_difficulty": net.get("difficulty", job_status.get("difficulty")),
@@ -266,7 +291,15 @@ def create_app(
 
     @app.get("/api/shares")
     def shares(limit: int = 50):
-        return {"shares": db.recent_shares(limit)}
+        return {
+            "best": {
+                "round": _share_quality(db.best_share(db.round_start_time())),
+                "all_time": _share_quality(db.best_share()),
+            },
+            "shares": [
+                _share_quality(row) for row in db.recent_shares(limit)
+            ],
+        }
 
     @app.get("/api/blocks")
     def blocks(limit: int = 20):

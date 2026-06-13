@@ -440,6 +440,12 @@
   letter-spacing: 0.06em;
 }
 
+.block-proof-stats small {
+  color: var(--muted);
+  font-size: 0.7rem;
+  line-height: 1.35;
+}
+
 .block-proof-stats strong {
   font-size: 1.1rem;
   text-transform: capitalize;
