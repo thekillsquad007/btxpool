@@ -98,12 +98,12 @@ The pool may serve the snapshot chain while the node independently validates
 historical blocks up to the snapshot base height. Do not restart WSL until
 that background validation completes.
 
-## Temporary public hostname
+## Public hostname
 
-Until a registered domain is available, the live configuration may use:
+The public hostname is:
 
 ```text
-btxfamilypool.103-91-16-143.sslip.io
+btxfamilypool.duckdns.org
 ```
 
 This is direct DNS to the public IP, not a Cloudflare proxy. Cloudflare's

@@ -923,8 +923,8 @@ export default function App() {
             amdbtx
           </a>{" "}
           and{" "}
-          <a href="https://github.com/thekillsquad007/btx-nvidia-miner" target="_blank" rel="noreferrer">
-            btx-nvidia-miner
+          <a href="https://github.com/dexbtx/minebtx" target="_blank" rel="noreferrer">
+            DexBTX Miner
           </a>
           .
         </p>
@@ -969,9 +969,13 @@ pool_port: ${pool?.stratum_port ?? 3333}
 payout_address: "btx1z...YOUR_ADDRESS"
 worker_name: "rig-1"
 
-# btx-nvidia-miner
-btx-miner --pool stratum+tcp://${host}:${pool?.stratum_port ?? 3333} \\
-  --user btx1z...YOUR_ADDRESS.rig01 --pass x --devices all`}</pre>
+# DexBTX Miner (~/.dexbtx-miner/config.yaml)
+pool_host: "${host}"
+pool_port: ${pool?.stratum_port ?? 3333}
+pool_tls: false
+payout_address: "btx1z...YOUR_ADDRESS"
+worker_name: "nvidia-rig-1"
+solver_backend: "cuda"`}</pre>
       </section>
 
       <div className="panels">

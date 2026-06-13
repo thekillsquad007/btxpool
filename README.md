@@ -1,6 +1,6 @@
 # BTX Pool
 
-Production-ready self-hosted mining pool for [BTX](https://github.com/btxchain/btx) (MatMul PoW). **PPLNS** payouts, per-wallet worker dashboard, and Stratum compatible with [amdbtx](https://github.com/thekillsquad007/amdbtx) (AMD) and [btx-nvidia-miner](https://github.com/thekillsquad007/btx-nvidia-miner) (NVIDIA).
+Production-ready self-hosted mining pool for [BTX](https://github.com/btxchain/btx) (MatMul PoW). **PPLNS** payouts, per-wallet worker dashboard, and Stratum compatible with [amdbtx](https://github.com/thekillsquad007/amdbtx) (AMD) and [DexBTX Miner](https://github.com/dexbtx/minebtx) (NVIDIA).
 
 ## Features
 
@@ -92,11 +92,15 @@ payout_address: "btx1z...YOUR_ADDRESS"
 worker_name: "rig-1"
 ```
 
-**btx-nvidia-miner**:
+**DexBTX Miner** (`~/.dexbtx-miner/config.yaml`):
 
-```bash
-btx-miner --pool stratum+tcp://192.168.1.100:3333 \
-  --user btx1z...YOUR_ADDRESS.rig01 --pass x --devices all
+```yaml
+pool_host: "btxfamilypool.duckdns.org"
+pool_port: 3333
+pool_tls: false
+payout_address: "btx1z...YOUR_ADDRESS"
+worker_name: "nvidia-rig-1"
+solver_backend: "cuda"
 ```
 
 ### 6. Miner wallet dashboard
@@ -113,7 +117,7 @@ Shows payable balance, immature credits, workers, PPLNS history, and payouts.
 2. PPLNS engine walks recent shares until window work ≥ `network_difficulty × multiplier`
 3. Each wallet receives `(share_work / window_work) × reward × (1 - fee%)`
 4. Credits start **immature** until `coinbase_maturity` confirmations
-5. Mature balance is paid on the 24h schedule if ≥ 5 BTX
+5. Mature balance is paid daily at 00:00 UTC if ≥ 5 BTX
 
 ## Architecture
 
