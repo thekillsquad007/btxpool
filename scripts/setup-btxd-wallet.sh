@@ -4,7 +4,7 @@
 set -euo pipefail
 
 POOL_ADDRESS="${1:-}"
-BTX_VERSION="${BTX_VERSION:-0.32.5}"
+BTX_VERSION="${BTX_VERSION:-0.32.9}"
 # BTX default datadir on Linux is ~/.bitcoin (not ~/.btx)
 INSTALL_DIR="${BTX_INSTALL_DIR:-$HOME/.bitcoin}"
 CONF="$INSTALL_DIR/btx.conf"
@@ -12,11 +12,10 @@ CONF="$INSTALL_DIR/btx.conf"
 echo "=== BTX node setup (wallet enabled) ==="
 
 if ! command -v btxd >/dev/null 2>&1; then
-  echo "btxd not found. Install from https://github.com/btxchain/btx/releases (v${BTX_VERSION})"
-  echo "  Example (Linux amd64):"
-  echo "    curl -LO https://github.com/btxchain/btx/releases/download/v${BTX_VERSION}/btx-${BTX_VERSION}-x86_64-linux-gnu.tar.gz"
-  echo "    tar xzf btx-${BTX_VERSION}-x86_64-linux-gnu.tar.gz"
-  echo "    sudo install -m 755 btx-${BTX_VERSION}/bin/btxd btx-${BTX_VERSION}/bin/btx-cli /usr/local/bin/"
+  echo "btxd not found. Install the signed v${BTX_VERSION} release tag from:"
+  echo "  https://github.com/btxchain/btx/releases/tag/v${BTX_VERSION}"
+  echo "BTX v${BTX_VERSION} does not publish a Linux binary archive; build the release"
+  echo "tag from source and install btxd and btx-cli before running this script."
   exit 1
 fi
 

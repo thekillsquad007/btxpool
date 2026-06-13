@@ -40,6 +40,35 @@ function Set-BtxTask {
         -Force | Out-Null
 }
 
+function Set-CaddyTask {
+    param(
+        [Microsoft.Management.Infrastructure.CimInstance]$Trigger
+    )
+
+    $script = Join-Path $PSScriptRoot "start-caddy-hidden.ps1"
+    $arguments = @(
+        "-NoProfile",
+        "-NonInteractive",
+        "-WindowStyle", "Hidden",
+        "-ExecutionPolicy", "Bypass",
+        "-File", "`"$script`""
+    ) -join " "
+    $action = New-ScheduledTaskAction -Execute $powershell -Argument $arguments
+    $settings = New-ScheduledTaskSettingsSet `
+        -ExecutionTimeLimit (New-TimeSpan -Minutes 5) `
+        -RestartCount 3 `
+        -RestartInterval (New-TimeSpan -Minutes 1) `
+        -Hidden `
+        -StartWhenAvailable
+    Register-ScheduledTask `
+        -TaskName "BTX Pool HTTPS" `
+        -Action $action `
+        -Trigger $Trigger `
+        -Settings $settings `
+        -Description "BTX Family Pool HTTPS reverse proxy" `
+        -Force | Out-Null
+}
+
 $startupCheck = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) `
     -RepetitionInterval (New-TimeSpan -Minutes 5)
 $hourly = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(2) `
@@ -58,6 +87,7 @@ Set-BtxTask "BTX Pool Wallet Backup" `
     "backup-wallet.sh" $daily
 Set-BtxTask "BTX Pool Peer Check" `
     "ensure-peers.sh" $everyFiveMinutes
+Set-CaddyTask $everyFiveMinutes
 
 Get-ScheduledTask -TaskName "BTX Pool *" |
     Select-Object TaskName, State |

@@ -58,6 +58,13 @@ if ($isAdmin) {
         -LocalPort 19335 -Protocol TCP -Action Allow -Profile Any `
         -ErrorAction Stop | Out-Null
     Write-Host "[OK]   Public node rule: $nodeRule" -ForegroundColor Green
+
+    $httpsRule = "BTX Pool HTTPS TCP 80 443"
+    Remove-NetFirewallRule -DisplayName $httpsRule -ErrorAction SilentlyContinue
+    New-NetFirewallRule -DisplayName $httpsRule -Direction Inbound `
+        -LocalPort 80,443 -Protocol TCP -Action Allow -Profile Any `
+        -ErrorAction Stop | Out-Null
+    Write-Host "[OK]   Public HTTPS rule: $httpsRule" -ForegroundColor Green
 } else {
     Write-Host "[SKIP] Firewall rules (requires Administrator)" -ForegroundColor Yellow
 }

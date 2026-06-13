@@ -106,6 +106,21 @@ The public hostname is:
 btxfamilypool.duckdns.org
 ```
 
+HTTPS is terminated by Caddy on the Windows host and proxied to the pool API
+at `127.0.0.1:8080`. Caddy obtains and renews the public certificate through
+the DuckDNS DNS challenge. The DuckDNS token is stored outside Git beside the
+Caddy binary with user-only Windows ACLs. Run
+`scripts/wsl-port-forward.ps1` from an elevated PowerShell prompt to create
+the Windows TCP 80/443 firewall rule, and forward router TCP 443 to the
+Windows host.
+
+## Node release
+
+The production node runs BTX 0.32.9. This release must be active before
+height 130,000 because it introduces the empty-block subsidy consensus rule.
+The previous 0.32.8 binaries remain beside the installed real binaries with
+the `.v0.32.8` suffix for emergency rollback only.
+
 This is direct DNS to the public IP, not a Cloudflare proxy. Cloudflare's
 standard proxy can carry the HTTP dashboard on supported HTTP ports, but raw
 Stratum TCP on port 3333 must use direct DNS or Cloudflare Spectrum.

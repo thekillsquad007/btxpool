@@ -47,7 +47,7 @@ See `docs/VERCEL_DEPLOY.md` for Vercel env vars (`POOL_API_ORIGIN`).
 | `frontend/` | React dashboard → Vercel |
 | `~/.bitcoin/` | **Canonical** btxd datadir (~53GB chain) |
 | `~/.bitcoin/btx.conf` | RPC: `miner`/`miner`, `server=1`, `txindex=1` |
-| `~/.local/btx/bin/btxd` | Installed btxd v0.32.5 |
+| `~/.local/btx/bin/btxd` | Installed btxd v0.32.9 |
 | `~/.amdbtx-miner/bin/btx-gbt-solve-hip` | CPU share verifier (from amdbtx) |
 
 **Do not use `~/.btx`** for production — that was a fresh empty chain started by mistake during setup; stopped and abandoned.
