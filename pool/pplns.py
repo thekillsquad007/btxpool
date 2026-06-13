@@ -64,7 +64,7 @@ class PplnsEngine:
             log.warning("PPLNS: no shares in window for height=%d", height)
             return None
 
-        total_work = sum(float(s["difficulty"]) for s in shares)
+        total_work = sum(float(s["work"]) for s in shares)
         if total_work <= 0:
             return None
 
@@ -72,7 +72,7 @@ class PplnsEngine:
         credit_rows: list[dict[str, Any]] = []
         for share in shares:
             addr = share["address"]
-            work = float(share["difficulty"])
+            work = float(share["work"])
             amount = int(distributable * work / total_work)
             if amount <= 0:
                 continue
@@ -87,26 +87,15 @@ class PplnsEngine:
         if not credits:
             return None
 
-        block_id = self.db.record_block_pplns(
+        block_id, round_id = self.db.credit_pplns_round(
             height=height,
             block_hash=block_hash,
             finder_address=finder_address,
             reward_sats=reward_sats,
             distributable_sats=distributable,
             window_work=total_work,
-            status="immature",
-        )
-        round_id = self.db.create_mining_round(
-            block_id=block_id,
-            height=height,
-            block_hash=block_hash,
-            reward_sats=reward_sats,
-            distributable_sats=distributable,
-            window_work=total_work,
-            status="immature",
             credits=credit_rows,
         )
-        self.db.add_immature_credits(credits)
 
         log.info(
             "PPLNS round=%d height=%d reward=%.4f BTX distributable=%.4f BTX "
@@ -158,6 +147,15 @@ class PplnsEngine:
                 continue
 
             self.db.update_round_confirmations(int(rnd["id"]), confirmations)
+            if confirmations < 0:
+                count = self.db.orphan_round(int(rnd["id"]))
+                if count:
+                    log.warning(
+                        "PPLNS round %d orphaned; reversed %d address credits",
+                        rnd["id"],
+                        count,
+                    )
+                continue
             if confirmations >= maturity:
                 count = self.db.mature_round(int(rnd["id"]))
                 if count:

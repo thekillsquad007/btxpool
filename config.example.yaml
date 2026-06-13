@@ -6,17 +6,20 @@ pool_name: "BTX Family Pool"
 stratum_host: "0.0.0.0"
 stratum_port: 3333
 
-# Web dashboard + API
-api_host: "0.0.0.0"
+# Web dashboard + API. Bind locally and publish through a TLS reverse proxy.
+api_host: "127.0.0.1"
 api_port: 8080
+# Same-origin by default. Add explicit dashboard origins only when required.
+cors_origins: []
 
 # BTX full node RPC (wallet must be enabled for payouts)
 rpc_url: "http://127.0.0.1:19334"
-rpc_user: "miner"
-rpc_password: "miner"
-# Local node with cookie auth instead:
+# Prefer local cookie authentication:
 # rpc_url: "http://127.0.0.1:19334"
-# rpc_cookie_file: "~/.btx/.cookie"
+rpc_cookie_file: "~/.bitcoin/.cookie"
+rpc_wallet: "pool"
+# rpc_user: ""
+# rpc_password: ""
 
 # Hot wallet receiving block rewards (must be in btxd wallet)
 pool_address: "btx1zYOUR_POOL_PAYOUT_ADDRESS"
@@ -26,20 +29,22 @@ payment_mode: "pplns"
 pool_fee_percent: 1.0
 dev_fee_address: "btx1z0069dewdztkwnrxx97lt9c5paynh0nynegqxq2kgykh0ct8xaggq0953gx"
 pplns_window_multiplier: 2.0
-coinbase_maturity: 100
+coinbase_maturity: 150
 
 # Payouts every 24 hours, minimum 5 BTX
 payout_interval_hours: 24
 min_payout_sats: 500000000
-payout_enabled: true
-payout_dry_run: false
+payout_enabled: false
+payout_dry_run: true
 
 # Starting share difficulty (vardiff adjusts per miner)
 default_difficulty: 0.001
 vardiff_enabled: true
 vardiff_target_seconds: 30
 vardiff_min: 0.001
-vardiff_max: 100.0
+vardiff_max: 2.0
+vardiff_max_change: 2.0
+vardiff_check_interval: 15
 
 # Template polling
 job_poll_interval: 10.0
@@ -49,6 +54,17 @@ gbt_longpoll_timeout: 60.0
 # CPU solver for share verification (build from amdbtx repo)
 solver_path: ""
 solver_backend: "cpu"
+solver_batch_size: 1
+solver_workers: 4
+# Global pending verification limit. Excess shares fail quickly instead of
+# exhausting memory or timing out every connected miner.
+share_verify_queue_size: 64
+session_pending_submits: 8
+max_stratum_connections: 512
+max_stratum_connections_per_ip: 32
+stratum_max_message_bytes: 16384
 
+# Production: use a Linux filesystem, e.g. /var/lib/btxpool/pool.db.
 database_path: "data/pool.db"
+database_wal: true
 log_level: "INFO"

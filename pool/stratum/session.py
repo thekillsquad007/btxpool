@@ -7,6 +7,7 @@ import json
 import logging
 import secrets
 import time
+from collections import OrderedDict
 from typing import Any, Callable
 
 from pool import PROTOCOL_CAPABILITIES, USER_AGENT
@@ -40,10 +41,12 @@ class StratumSession:
         on_submit: Callable[..., Any],
         on_authorize: Callable[..., Any],
         on_metrics: Callable[..., Any] | None = None,
-        get_job_notify: Callable[[], list | None],
+        get_job_notify: Callable[[float | None], list | None],
         get_difficulty: Callable[[], float],
         vardiff_callback: Callable[[str, float], float] | None = None,
         send_canonical_name: bool = True,
+        max_pending_submits: int = 8,
+        max_message_bytes: int = 16384,
     ):
         self.reader = reader
         self.writer = writer
@@ -64,10 +67,17 @@ class StratumSession:
         self._canonical_name = ""
         self._operator_label = ""
         self._session_difficulty = 0.01
+        self._authorized_at = 0.0
         self._last_share_at = 0.0
         self._shares_session = 0
         self._closed = False
         self._send_lock = asyncio.Lock()
+        self._max_pending_submits = max(1, int(max_pending_submits))
+        self._max_message_bytes = max(1024, int(max_message_bytes))
+        self._submit_tasks: set[asyncio.Task] = set()
+        self._job_assignments: OrderedDict[str, tuple[str, float]] = OrderedDict()
+        self._job_assignment_seq = 0
+        self._vardiff_lock = asyncio.Lock()
         self._send_canonical_name = send_canonical_name
 
     async def send(self, msg: dict) -> None:
@@ -79,7 +89,24 @@ class StratumSession:
             await self.writer.drain()
 
     async def send_notify(self, params: list) -> None:
-        await self.send({"id": None, "method": "mining.notify", "params": params})
+        assigned = list(params)
+        source_job_id = str(assigned[0])
+        self._job_assignment_seq += 1
+        assigned_job_id = (
+            f"{source_job_id}.{self._extranonce1}.{self._job_assignment_seq:x}"
+        )
+        assigned[0] = assigned_job_id
+        self._job_assignments[assigned_job_id] = (
+            source_job_id,
+            self._session_difficulty,
+        )
+        while len(self._job_assignments) > 64:
+            self._job_assignments.popitem(last=False)
+        await self.send({
+            "id": None,
+            "method": "mining.notify",
+            "params": assigned,
+        })
 
     async def send_set_difficulty(self, difficulty: float) -> None:
         self._session_difficulty = difficulty
@@ -97,6 +124,9 @@ class StratumSession:
             while not self._closed:
                 line = await self.reader.readline()
                 if not line:
+                    break
+                if len(line) > self._max_message_bytes:
+                    log.warning("oversized stratum message from %s", self.peer)
                     break
                 try:
                     msg = json.loads(line.decode().strip())
@@ -130,7 +160,28 @@ class StratumSession:
         elif method == "mining.authorize":
             await self._handle_authorize(req_id, params)
         elif method == "mining.submit":
-            await self._handle_submit(req_id, params)
+            if len(self._submit_tasks) >= self._max_pending_submits:
+                await self.send({
+                    "id": req_id,
+                    "result": False,
+                    "error": [20, "Too many pending shares; retry shortly", None],
+                })
+                return
+            submitted_job_id = str(params[1]) if len(params) > 1 else ""
+            source_job_id, submit_difficulty = self._job_assignments.get(
+                submitted_job_id,
+                (submitted_job_id, self._session_difficulty),
+            )
+            task = asyncio.create_task(
+                self._run_submit(
+                    req_id,
+                    params,
+                    source_job_id,
+                    submit_difficulty,
+                )
+            )
+            self._submit_tasks.add(task)
+            task.add_done_callback(self._submit_tasks.discard)
         elif method == "mining.extranonce.subscribe":
             await self.send({"id": req_id, "result": True, "error": None})
         elif method == "worker.report_metrics":
@@ -144,6 +195,30 @@ class StratumSession:
                     "result": None,
                     "error": [20, f"Unknown method: {method}", None],
                 })
+
+    async def _run_submit(
+        self,
+        req_id: Any,
+        params: list,
+        source_job_id: str,
+        submit_difficulty: float,
+    ) -> None:
+        try:
+            await self._handle_submit(
+                req_id,
+                params,
+                source_job_id,
+                submit_difficulty,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            log.warning("submit error %s req_id=%s: %s", self.peer, req_id, e)
+            await self.send({
+                "id": req_id,
+                "result": False,
+                "error": [20, "Internal share validation error", None],
+            })
 
     async def _handle_subscribe(self, req_id: Any, params: list) -> None:
         user_agent = params[0] if params else USER_AGENT
@@ -168,7 +243,7 @@ class StratumSession:
     async def _push_work(self) -> None:
         try:
             await self.send_set_difficulty(self.get_difficulty())
-            notify = self.get_job_notify()
+            notify = self.get_job_notify(self._session_difficulty)
             if notify:
                 await self.send_notify(notify)
                 log.info("pushed job %s to %s", notify[0], self.peer)
@@ -191,21 +266,26 @@ class StratumSession:
         self._worker_name = worker
         self._canonical_name = f"{address}.{worker}"
 
-        # Send authorize before any notify/difficulty push. A notify holding send_lock
-        # on a slow LAN path was delaying id:2 past the miner's 30s handshake timeout.
-        await self.send({"id": req_id, "result": True, "error": None})
-        self._authorized = True
-        log.info("authorized %s as %s (req_id=%s)", self.peer, self._canonical_name, req_id)
-        asyncio.create_task(self._push_work())
-        asyncio.create_task(self._finish_authorize(address, worker))
-
-    async def _finish_authorize(self, address: str, worker: str) -> None:
         try:
-            ok = await self.on_authorize(address, worker)
-            if not ok:
-                log.warning("miner registration failed for %s.%s", address[:16], worker)
+            ok = await asyncio.wait_for(
+                self.on_authorize(address, worker), timeout=15.0
+            )
         except Exception as e:
             log.warning("miner registration error for %s: %s", address[:16], e)
+            ok = False
+        if not ok:
+            await self.send({
+                "id": req_id,
+                "result": False,
+                "error": [24, "Invalid BTX address", None],
+            })
+            return
+
+        await self.send({"id": req_id, "result": True, "error": None})
+        self._authorized = True
+        self._authorized_at = time.time()
+        log.info("authorized %s as %s (req_id=%s)", self.peer, self._canonical_name, req_id)
+        asyncio.create_task(self._push_work())
         if self._send_canonical_name:
             try:
                 await self.send_canonical_name(self._canonical_name)
@@ -225,6 +305,15 @@ class StratumSession:
                 return
         if not isinstance(payload, dict):
             return
+        solver_sha = str(payload.get("solver_sha256") or "")
+        if solver_sha:
+            log.info(
+                "worker metrics %s solver=%s backend=%s wrapper=%s",
+                self._canonical_name,
+                solver_sha[:12],
+                payload.get("solver_backend", ""),
+                payload.get("wrapper_version", ""),
+            )
         try:
             solver_nps = float(payload.get("solver_nps") or 0)
         except (TypeError, ValueError):
@@ -236,7 +325,13 @@ class StratumSession:
         except Exception as e:
             log.debug("metrics callback failed for %s: %s", self.peer, e)
 
-    async def _handle_submit(self, req_id: Any, params: list) -> None:
+    async def _handle_submit(
+        self,
+        req_id: Any,
+        params: list,
+        source_job_id: str,
+        submit_difficulty: float,
+    ) -> None:
         if not self._authorized:
             await self.send({"id": req_id, "result": False, "error": [25, "Not authorized", None]})
             return
@@ -244,7 +339,7 @@ class StratumSession:
             await self.send({"id": req_id, "result": False, "error": [20, "Malformed submit", None]})
             return
 
-        worker, job_id, extranonce2, ntime_hex, nonce_hex = params[:5]
+        worker, _job_id, extranonce2, ntime_hex, nonce_hex = params[:5]
         try:
             ntime = int(ntime_hex, 16)
             nonce64 = int(nonce_hex, 16)
@@ -254,13 +349,13 @@ class StratumSession:
 
         result = await self.on_submit(
             address=self._address,
-            worker_name=str(worker),
+            worker_name=self._worker_name,
             canonical_name=self._canonical_name,
-            job_id=str(job_id),
+            job_id=source_job_id,
             extranonce2=str(extranonce2),
             ntime=ntime,
             nonce64=nonce64,
-            difficulty=self._session_difficulty,
+            difficulty=submit_difficulty,
         )
 
         if result.get("accepted"):
@@ -268,9 +363,19 @@ class StratumSession:
             self._shares_session += 1
             self._last_share_at = time.time()
             if self.vardiff_callback:
-                new_diff = self.vardiff_callback(self._canonical_name, self._session_difficulty)
-                if abs(new_diff - self._session_difficulty) > 1e-9:
-                    await self.send_set_difficulty(new_diff)
+                async with self._vardiff_lock:
+                    # An accepted share from an older assignment must not
+                    # readjust the current target or create a notify storm.
+                    if abs(submit_difficulty - self._session_difficulty) <= 1e-9:
+                        new_diff = self.vardiff_callback(
+                            self._canonical_name,
+                            self._session_difficulty,
+                        )
+                        if abs(new_diff - self._session_difficulty) > 1e-9:
+                            await self.send_set_difficulty(new_diff)
+                            notify = self.get_job_notify(new_diff)
+                            if notify:
+                                await self.send_notify(notify)
         else:
             code = int(result.get("error_code", 23))
             reason = str(result.get("error", "rejected"))

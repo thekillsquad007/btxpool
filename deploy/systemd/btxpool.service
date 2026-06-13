@@ -1,0 +1,23 @@
+[Unit]
+Description=BTX mining pool
+After=network-online.target btxd.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=aravindthana
+Group=aravindthana
+WorkingDirectory=/mnt/e/Business/btxpool
+Environment=BTXPOOL_CONFIG=/mnt/e/Business/btxpool/config.yaml
+ExecStart=/mnt/e/Business/btxpool/.venv/bin/btxpool -c /mnt/e/Business/btxpool/config.yaml
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/aravindthana/.local/share/btxpool /mnt/e/Business/btxpool/data
+
+[Install]
+WantedBy=multi-user.target

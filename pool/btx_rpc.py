@@ -6,6 +6,7 @@ import base64
 import json
 import logging
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any
@@ -27,9 +28,13 @@ class BtxRpcClient:
         rpc_user: str = "",
         rpc_password: str = "",
         cookie_file: str = "",
+        wallet: str = "",
         timeout: float = 60.0,
     ):
-        self.url = url.rstrip("/") + "/"
+        base_url = url.rstrip("/")
+        if wallet:
+            base_url += "/wallet/" + urllib.parse.quote(wallet, safe="")
+        self.url = base_url + "/"
         self.timeout = timeout
         self._msg_id = 0
         self._auth_header = self._build_auth(rpc_user, rpc_password, cookie_file)
@@ -86,8 +91,13 @@ class BtxRpcClient:
             raise RpcError(err.get("code", -1), err.get("message", str(err)))
         return body.get("result")
 
-    def send_to_address(self, address: str, amount_btx: float) -> str:
-        result = self.call("sendtoaddress", [address, amount_btx], timeout=120.0)
+    def send_to_address(
+        self, address: str, amount_btx: float, comment: str = ""
+    ) -> str:
+        params: list[Any] = [address, amount_btx]
+        if comment:
+            params.append(comment)
+        result = self.call("sendtoaddress", params, timeout=120.0)
         return str(result)
 
     def get_wallet_balance(self) -> float:

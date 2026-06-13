@@ -5,11 +5,13 @@ from __future__ import annotations
 import json
 import logging
 import os
+import queue
 import subprocess
 import threading
 from pathlib import Path
 from typing import Any
 
+from .block_builder import resolve_header_seeds
 from .difficulty import compare_digest_le
 
 log = logging.getLogger(__name__)
@@ -21,24 +23,33 @@ class ShareValidator:
         solver_path: str = "",
         backend: str = "cpu",
         runtime_ld_path: str = "",
+        batch_size: int = 1,
+        workers: int = 1,
     ):
         self.solver_path = Path(solver_path).expanduser() if solver_path else None
         self.backend = backend
         self.runtime_ld_path = runtime_ld_path
-        self._proc: subprocess.Popen[str] | None = None
-        self._lock = threading.Lock()
-        self._ready = threading.Event()
+        self.batch_size = max(int(batch_size), 1)
+        self.workers = max(int(workers), 1)
+        self._procs: list[subprocess.Popen[str] | None] = [None] * self.workers
+        self._ready: list[threading.Event] = [
+            threading.Event() for _ in range(self.workers)
+        ]
+        self._slots: queue.Queue[int] = queue.Queue()
+        for slot in range(self.workers):
+            self._slots.put(slot)
 
 
     @property
     def available(self) -> bool:
         return self.solver_path is not None and self.solver_path.is_file()
 
-    def _ensure_daemon(self) -> None:
-        if self._proc is not None and self._proc.poll() is None and self._ready.is_set():
+    def _ensure_daemon(self, slot: int) -> None:
+        proc = self._procs[slot]
+        if proc is not None and proc.poll() is None and self._ready[slot].is_set():
             return
-        self._stop_daemon()
-        self._ready.clear()
+        self._stop_daemon(slot)
+        self._ready[slot].clear()
         if not self.available:
             raise RuntimeError("solver not configured")
 
@@ -56,10 +67,10 @@ class ShareValidator:
             str(self.solver_path),
             "--daemon",
             "--backend", self.backend,
-            "--batch-size", "1",
+            "--batch-size", str(self.batch_size),
             "--epsilon-bits", "18",
         ]
-        self._proc = subprocess.Popen(
+        proc = subprocess.Popen(
             cmd,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
@@ -68,52 +79,61 @@ class ShareValidator:
             bufsize=1,
             env=env,
         )
-        assert self._proc.stdout is not None
+        self._procs[slot] = proc
+        assert proc.stdout is not None
         deadline = 15.0
         import time
         start = time.time()
         while time.time() - start < deadline:
-            line = self._proc.stdout.readline()
+            line = proc.stdout.readline()
             if not line:
                 break
             line = line.strip()
             if "daemon_ready" in line:
-                self._ready.set()
-                log.info("share solver daemon ready: %s", self.solver_path)
+                self._ready[slot].set()
+                log.info(
+                    "share solver daemon %d/%d ready: %s",
+                    slot + 1,
+                    self.workers,
+                    self.solver_path,
+                )
                 return
-        self._stop_daemon()
+        self._stop_daemon(slot)
         raise RuntimeError("solver daemon failed to start")
 
-    def _stop_daemon(self) -> None:
-        if self._proc is None:
+    def _stop_daemon(self, slot: int) -> None:
+        proc = self._procs[slot]
+        if proc is None:
             return
         try:
-            self._proc.terminate()
-            self._proc.wait(timeout=2)
+            proc.terminate()
+            proc.wait(timeout=2)
         except Exception:
             try:
-                self._proc.kill()
+                proc.kill()
             except Exception:
                 pass
-        self._proc = None
-        self._ready.clear()
+        self._procs[slot] = None
+        self._ready[slot].clear()
 
     def _solve(self, payload: dict[str, Any]) -> dict[str, Any]:
-        with self._lock:
-            self._ensure_daemon()
-            assert self._proc is not None and self._proc.stdin is not None
-            assert self._proc.stdout is not None
+        slot = self._slots.get()
+        try:
+            self._ensure_daemon(slot)
+            proc = self._procs[slot]
+            assert proc is not None and proc.stdin is not None
+            assert proc.stdout is not None
 
-            self._proc.stdin.write(json.dumps(payload) + "\n")
-            self._proc.stdin.flush()
+            proc.stdin.write(json.dumps(payload) + "\n")
+            proc.stdin.flush()
 
             import time
             deadline = time.time() + float(payload.get("max_seconds", 120.0)) + 10.0
             while time.time() < deadline:
-                line = self._proc.stdout.readline()
+                line = proc.stdout.readline()
                 if not line:
-                    if self._proc.poll() is not None:
-                        self._stop_daemon()
+                    if proc.poll() is not None:
+                        self._stop_daemon(slot)
                         raise RuntimeError("solver daemon exited unexpectedly")
                     continue
                 line = line.strip()
@@ -129,6 +149,8 @@ class ShareValidator:
                 except json.JSONDecodeError:
                     log.debug("solver non-json: %s", line[:120])
             raise RuntimeError("solver timed out waiting for result")
+        finally:
+            self._slots.put(slot)
 
     def verify(
         self,
@@ -141,8 +163,25 @@ class ShareValidator:
         if not self.available:
             raise RuntimeError(
                 f"solver not configured or missing at {self.solver_path}; "
-                "set solver_path to btx-gbt-solve-hip (from amdbtx install)"
+                "set solver_path to a MineBTX-compatible btx-gbt-solve"
             )
+
+        seed_view = type(
+            "SeedJob",
+            (),
+            {
+                "prev_hash": job["prev_hash"],
+                "block_height": int(job["block_height"]),
+                "version": int(job["version"]),
+                "merkle_root": job["merkle_root"],
+                "time": int(ntime),
+                "bits": job["bits"],
+                "matmul_n": int(job.get("matmul_n", 512)),
+                "seed_a": job["seed_a"],
+                "seed_b": job["seed_b"],
+            },
+        )()
+        seed_a, seed_b = resolve_header_seeds(seed_view, nonce64)
 
         payload = {
             "version": int(job["version"]),
@@ -150,8 +189,8 @@ class ShareValidator:
             "merkle_root": job["merkle_root"],
             "time": int(ntime),
             "bits": job["bits"],
-            "seed_a": job["seed_a"],
-            "seed_b": job["seed_b"],
+            "seed_a": seed_a.hex(),
+            "seed_b": seed_b.hex(),
             "block_height": int(job["block_height"]),
             "matmul_n": int(job.get("matmul_n", 512)),
             "matmul_b": int(job.get("matmul_b", 16)),
@@ -194,6 +233,42 @@ class ShareValidator:
             digest, block_target_hex
         )
         is_share = compare_digest_le(digest, share_target_hex)
+        matrix_c = None
+
+        if is_block:
+            block_payload = dict(payload)
+            block_payload.update({
+                "epsilon_bits": int(job.get("epsilon_bits", 18)),
+                "share_target": block_target_hex,
+                "include_product_payload": 1,
+            })
+            try:
+                block_result = self._solve(block_payload)
+            except Exception as e:
+                log.warning("block payload verification failed: %s", e)
+                return {
+                    "valid": False,
+                    "reason": "block_payload_error",
+                    "nonce64": nonce64,
+                }
+            if (
+                not block_result.get("found")
+                or block_result.get("digest") != digest
+                or not block_result.get("is_block")
+            ):
+                return {
+                    "valid": False,
+                    "reason": "prehash_miss",
+                    "nonce64": nonce64,
+                }
+            matrix_c = block_result.get("matrix_c")
+            expected_words = int(job.get("matmul_n", 512)) ** 2
+            if not isinstance(matrix_c, list) or len(matrix_c) != expected_words:
+                return {
+                    "valid": False,
+                    "reason": "missing_product_payload",
+                    "nonce64": nonce64,
+                }
 
         if int(result.get("nonce64", nonce64)) != nonce64:
             return {
@@ -218,7 +293,9 @@ class ShareValidator:
             "nonce64": nonce64,
             "ntime": ntime,
             "reason": "ok" if is_share else "target_miss",
+            "matrix_c": matrix_c,
         }
 
     def close(self) -> None:
-        self._stop_daemon()
+        for slot in range(self.workers):
+            self._stop_daemon(slot)

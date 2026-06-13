@@ -123,6 +123,9 @@ class JobManager:
         with self._lock:
             return self._jobs.get(job_id)
 
+    def share_target_for_difficulty(self, difficulty: float, job: PoolJob) -> str:
+        return difficulty_to_share_target(difficulty, job.block_target or None)
+
     def consume_broadcast_flag(self) -> bool:
         with self._lock:
             if self._needs_broadcast:
@@ -197,13 +200,12 @@ class JobManager:
 
     @staticmethod
     def _header_fingerprint(job: PoolJob) -> tuple:
-        """Header fields that define MatMul work (v2 seeds derive from these)."""
+        """MatMul work identity — excludes curtime (miners roll ntime per share)."""
         return (
             job.prev_hash,
             job.block_height,
             job.version,
             job.merkle_root,
-            job.time,
             job.bits,
         )
 
@@ -221,12 +223,12 @@ class JobManager:
         )
         height = int(gbt.get("height", hc.get("height", challenge.get("height", 0))))
         prev_hash = (
-            hc.get("previousblockhash")
-            or gbt.get("previousblockhash", "")
+            gbt.get("previousblockhash")
+            or hc.get("previousblockhash", "")
         )
-        version = int(hc.get("version", gbt.get("version", 536870912)))
-        block_time = int(hc.get("time", gbt.get("curtime", int(time.time()))))
-        bits = hc.get("bits", gbt.get("bits", ""))
+        version = int(gbt.get("version", hc.get("version", 536870912)))
+        block_time = int(gbt.get("curtime", hc.get("time", int(time.time()))))
+        bits = gbt.get("bits", hc.get("bits", ""))
         block_target = gbt.get("target", challenge.get("target", ""))
         seed_a = hc.get("seed_a", matmul.get("seed_a", gbt.get("seed_a", "0" * 64)))
         seed_b = hc.get("seed_b", matmul.get("seed_b", gbt.get("seed_b", "0" * 64)))
@@ -318,10 +320,9 @@ class JobManager:
 
             if current and self._block_key(current) == self._block_key(job):
                 if self._header_fingerprint(current) == self._header_fingerprint(job):
-                    # Challenge seeds refresh every RPC poll but v2 work only depends
-                    # on the header; keep job id stable and avoid notify churn.
-                    current.seed_a = job.seed_a
-                    current.seed_b = job.seed_b
+                    # A Stratum job is immutable once broadcast. btxd may return
+                    # refreshed challenge seeds for the same header, but miners
+                    # are still solving the original seeds under this job id.
                     current.gbt = job.gbt
                     current.block_target = job.block_target
                     current.share_target = difficulty_to_share_target(
@@ -333,9 +334,7 @@ class JobManager:
                 # immutable for share validation; issue a new id and notify miners.
                 height = job.block_height
                 job.job_id = f"btx-{height}-{secrets.token_hex(4)}"
-                job.clean_jobs = (
-                    current.merkle_root != job.merkle_root or current.time != job.time
-                )
+                job.clean_jobs = current.merkle_root != job.merkle_root
                 self._jobs[job.job_id] = job
                 self._current = job
                 self._needs_broadcast = True

@@ -29,6 +29,12 @@ interface PoolStats {
   pool: {
     hashrate: HashrateDisplay;
     hashrate_10m: HashrateDisplay;
+    hashrate_gate?: HashrateDisplay;
+    hashrate_gate_10m?: HashrateDisplay;
+    reported_nonce_rate?: HashrateDisplay;
+    reported_gate_rate?: HashrateDisplay;
+    hashrate_source?: string;
+    epsilon_bits: number;
     difficulty: number;
     connected_miners: number;
     network_share_percent: number;
@@ -56,6 +62,8 @@ interface BlockProgress {
   luck_message: string;
   round_elapsed: DurationDisplay;
   expected_block_time: DurationDisplay;
+  median_block_time: DurationDisplay;
+  p95_block_time: DurationDisplay;
   remaining_block_time: DurationDisplay;
   round_shares: number;
   round_work: number;
@@ -97,6 +105,7 @@ interface PoolData {
   payout_interval_hours?: number;
   next_payout_eta?: number | null;
   payout_enabled?: boolean;
+  payout_dry_run?: boolean;
   stratum_port: number;
   algorithm: string;
   totals: {
@@ -119,6 +128,21 @@ interface PoolData {
     last_error: string;
   };
   connected_miners: number;
+  operations?: {
+    ready: boolean;
+    unresolved_payouts: number;
+    capacity: {
+      connected_sessions: number;
+      authorized_sessions: number;
+      verifier_workers: number;
+      verifier_pending: number;
+      verifier_queue_limit: number;
+      verifier_utilization_percent: number;
+      verifier_completed: number;
+      verifier_overload_rejections: number;
+      verifier_average_ms: number;
+    };
+  };
   stats: PoolStats;
   mining?: MiningContext;
 }
@@ -134,6 +158,7 @@ interface Miner {
   blocks_found: number;
   hashrate_estimate: number;
   hashrate?: HashrateDisplay;
+  hashrate_nonce_reported?: HashrateDisplay;
 }
 
 interface Share {
@@ -168,24 +193,6 @@ function timeAgo(ts: number): string {
 function truncate(addr: string, n = 12): string {
   if (addr.length <= n * 2 + 3) return addr;
   return `${addr.slice(0, n)}...${addr.slice(-n)}`;
-}
-
-function formatMinerHashrate(hs: number): string {
-  if (!Number.isFinite(hs) || hs <= 0) return "—";
-  const units: [number, string][] = [
-    [1e12, "TH/s"],
-    [1e9, "GH/s"],
-    [1e6, "MH/s"],
-    [1e3, "kH/s"],
-    [1, "H/s"],
-  ];
-  for (const [scale, unit] of units) {
-    if (hs >= scale) {
-      const value = hs / scale;
-      return value < 100 ? `${value.toFixed(2)} ${unit}` : `${value.toFixed(0)} ${unit}`;
-    }
-  }
-  return `${hs.toFixed(0)} H/s`;
 }
 
 function pctBar(value: number, max = 100): number {
@@ -312,7 +319,7 @@ function WalletDashboard({ address }: { address: string }) {
                       <th>Worker</th>
                       <th>Shares</th>
                       <th>Rejected</th>
-                      <th>Est. H/s</th>
+                      <th>Pool N/s</th>
                       <th>Last seen</th>
                     </tr>
                   </thead>
@@ -432,6 +439,17 @@ export default function App() {
   const blockReward = pool?.chain.coinbasevalue ?? 0;
   const targetLog10 = mining?.share_easier?.log10 ?? 8;
   const blockProgress = mining?.block_progress;
+  const totalSubmissions =
+    (pool?.totals.shares ?? 0) + (pool?.totals.rejected_shares ?? 0);
+  const rejectionRate = totalSubmissions
+    ? ((pool?.totals.rejected_shares ?? 0) / totalSubmissions) * 100
+    : 0;
+  const capacity = pool?.operations?.capacity;
+  const payoutStatus = !pool?.payout_enabled
+    ? "Disabled"
+    : pool?.payout_dry_run
+      ? "Dry run"
+      : "Automatic";
 
   return (
     <div className="app">
@@ -459,6 +477,55 @@ export default function App() {
         <div className="banner warn">{pool.chain.last_error}</div>
       )}
 
+      <section className="production-hero">
+        <div className="production-copy">
+          <span className="eyebrow">BTX MatMul mining pool</span>
+          <h2>Transparent PPLNS mining with live share accounting.</h2>
+          <p>
+            Connect AMD or NVIDIA rigs, track each worker, and view pool work,
+            block probability, balances, and payout history from one dashboard.
+          </p>
+          <div className="hero-actions">
+            <a className="primary-action" href="#connect">Connect a miner</a>
+            <a className="secondary-action" href="#pool-health">Pool health</a>
+          </div>
+        </div>
+        <div className="production-endpoint">
+          <span className="endpoint-label">Stratum endpoint</span>
+          <code>{`stratum+tcp://${host}:${pool?.stratum_port ?? 3333}`}</code>
+          <span className="endpoint-note">
+            Username: your BTX address, optionally followed by a worker name
+          </span>
+        </div>
+      </section>
+
+      <section className="operations-strip" id="pool-health">
+        <OperationalCard
+          label="Pool status"
+          value={pool?.operations?.ready ? "Ready" : "Degraded"}
+          tone={pool?.operations?.ready ? "good" : "warn"}
+          note={pool?.chain.synced ? `Chain height ${pool.chain.height.toLocaleString()}` : "Waiting for a current job"}
+        />
+        <OperationalCard
+          label="Share verifier"
+          value={capacity ? `${capacity.verifier_pending} / ${capacity.verifier_queue_limit}` : "Loading"}
+          tone={(capacity?.verifier_utilization_percent ?? 0) >= 80 ? "warn" : "good"}
+          note={capacity ? `${capacity.verifier_workers} workers, ${capacity.verifier_average_ms.toFixed(1)} ms average` : "Queue utilization"}
+        />
+        <OperationalCard
+          label="Share quality"
+          value={`${rejectionRate.toFixed(2)}% rejected`}
+          tone={rejectionRate > 5 ? "warn" : "good"}
+          note={`${pool?.totals.shares ?? 0} accepted shares`}
+        />
+        <OperationalCard
+          label="Payout mode"
+          value={payoutStatus}
+          tone={pool?.payout_enabled && !pool?.payout_dry_run ? "good" : "neutral"}
+          note={`${pool?.payment_mode?.toUpperCase() ?? "PPLNS"} / ${pool?.fee_percent ?? 0}% fee / ${pool?.min_payout_btx ?? 5} BTX min`}
+        />
+      </section>
+
       <section className="hero-stats">
         <div className="hero-card network">
           <span className="hero-label">Network hashrate</span>
@@ -472,11 +539,11 @@ export default function App() {
         </div>
         <div className="hero-card pool">
           <span className="hero-label">Pool hashrate</span>
-          <span className="hero-value accent">{stats?.pool.hashrate.display ?? "0 H/s"}</span>
+          <span className="hero-value accent">{stats?.pool.hashrate.display ?? "0 N/s"}</span>
           <span className="hero-sub">
-            {stats?.pool.shares_10m
-              ? `${stats.pool.shares_10m} shares / 10m`
-              : "Submit shares to estimate"}
+            {stats?.pool.hashrate.raw
+              ? `${stats.pool.network_share_percent?.toFixed(3) ?? "0"}% of network · ${stats.pool.hashrate_gate?.display ?? "—"} gate · ${stats.pool.shares_10m} shares / 10m`
+              : "Submit shares to estimate pool hashrate"}
           </span>
         </div>
         <div className="hero-card block">
@@ -497,12 +564,12 @@ export default function App() {
         <section className="luck-card">
           <div className="luck-head">
             <div>
-              <h2>Block find progress</h2>
+              <h2>Block find probability</h2>
               <p className="luck-sub">{blockProgress.luck_message}</p>
             </div>
             <div className="luck-pct">
               <span className="luck-value">{blockProgress.progress_display}</span>
-              <span className="luck-label">round luck</span>
+              <span className="luck-label">chance this round</span>
             </div>
           </div>
           <div className="luck-bar-track">
@@ -510,16 +577,12 @@ export default function App() {
               className={`luck-bar-fill ${blockProgress.luck_status}`}
               style={{ width: `${Math.max(blockProgress.bar_fill_percent, blockProgress.progress_percent > 0 ? 2 : 0)}%` }}
             />
-            <div className="luck-bar-marker" style={{ left: "100%" }} title="100% = statistically due" />
           </div>
           <div className="luck-meta">
             <span>Round: {blockProgress.round_elapsed.display}</span>
-            <span>Target: {blockProgress.expected_block_time.display}</span>
-            <span>
-              {blockProgress.progress_percent >= 100
-                ? "Overdue for a block"
-                : `ETA ${blockProgress.remaining_block_time.display}`}
-            </span>
+            <span>Mean wait now: {blockProgress.expected_block_time.display}</span>
+            <span>50% within: {blockProgress.median_block_time.display}</span>
+            <span>95% within: {blockProgress.p95_block_time.display}</span>
             <span>{blockProgress.round_shares.toLocaleString()} shares this round</span>
           </div>
           {blockProgress.last_block_luck_percent != null && (
@@ -715,14 +778,16 @@ export default function App() {
 
       <section className="stats-grid">
         <StatCard label="Network difficulty" value={stats?.network.difficulty?.toFixed(6) ?? "—"} />
-        <StatCard label="Pool hashrate (10m)" value={stats?.pool.hashrate_10m.display ?? "0 H/s"} />
-        <StatCard label="Pool hashrate (est.)" value={stats?.pool.hashrate.display ?? "0 H/s"} accent />
+        <StatCard label="Pool hashrate (10m)" value={stats?.pool.hashrate_10m.display ?? "0 N/s"} />
+        <StatCard label="Network share" value={`${stats?.pool.network_share_percent?.toFixed(3) ?? "0"}%`} accent />
+        <StatCard label="Pool gate rate (10m)" value={stats?.pool.hashrate_gate_10m?.display ?? stats?.pool.hashrate_gate?.display ?? "0 N/s"} />
+        <StatCard label="Miner-reported N/s" value={stats?.pool.reported_nonce_rate?.display ?? "0 N/s"} />
         <StatCard label="Total work" value={(pool?.totals.total_work ?? 0).toFixed(2)} />
         <StatCard label="Next difficulty" value={stats?.network.next_difficulty?.toFixed(6) ?? "—"} />
         <StatCard label="Chain" value={stats?.network.chain ?? "main"} />
       </section>
 
-      <section className="connect-card">
+      <section className="connect-card" id="connect">
         <h2>Connect your miners</h2>
         <p>
           Compatible with{" "}
@@ -786,7 +851,8 @@ btx-miner --pool stratum+tcp://${host}:${pool?.stratum_port ?? 3333} \\
                   <th>Worker</th>
                   <th>Shares</th>
                   <th>Rejected</th>
-                  <th>Est. H/s</th>
+                  <th>Pool N/s</th>
+                  <th>Miner N/s</th>
                   <th>Last seen</th>
                 </tr>
               </thead>
@@ -797,7 +863,10 @@ btx-miner --pool stratum+tcp://${host}:${pool?.stratum_port ?? 3333} \\
                     <td>{m.shares_valid}</td>
                     <td className={m.shares_invalid > 0 ? "danger" : ""}>{m.shares_invalid}</td>
                     <td className="muted">
-                      {m.hashrate?.display ?? formatMinerHashrate(m.hashrate_estimate)}
+                      {m.hashrate?.display ?? "—"}
+                    </td>
+                    <td className="muted">
+                      {m.hashrate_nonce_reported?.display ?? "—"}
                     </td>
                     <td className="muted">{timeAgo(m.last_seen)}</td>
                   </tr>
@@ -932,4 +1001,24 @@ function Panel({ title, children }: { title: string; children: React.ReactNode }
 
 function EmptyState({ text }: { text: string }) {
   return <p className="empty">{text}</p>;
+}
+
+function OperationalCard({
+  label,
+  value,
+  note,
+  tone,
+}: {
+  label: string;
+  value: string;
+  note: string;
+  tone: "good" | "warn" | "neutral";
+}) {
+  return (
+    <div className={`operational-card ${tone}`}>
+      <span className="operational-label">{label}</span>
+      <strong>{value}</strong>
+      <span className="operational-note">{note}</span>
+    </div>
+  );
 }

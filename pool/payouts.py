@@ -37,6 +37,30 @@ class PayoutWorker:
         if not self.cfg.get("payout_enabled", True):
             log.info("payout worker disabled (payout_enabled=false)")
             return
+        if not self.cfg.get("payout_dry_run", False):
+            try:
+                wallet = self.rpc.call("getwalletinfo", [], timeout=15.0)
+                address = self.rpc.call(
+                    "getaddressinfo",
+                    [self.cfg.get("pool_address", "")],
+                    timeout=15.0,
+                )
+                if not address.get("ismine", False):
+                    raise RuntimeError("configured pool address is not owned by wallet")
+                log.info(
+                    "payout wallet ready: %s balance=%s",
+                    wallet.get("walletname", ""),
+                    wallet.get("balance", "unknown"),
+                )
+            except Exception as e:
+                log.error("payout worker refused to start: %s", e)
+                return
+        unresolved = self.db.unresolved_payouts()
+        if unresolved:
+            log.error(
+                "payout worker blocked: %d unresolved payout(s) require reconciliation",
+                len(unresolved),
+            )
         self._thread = threading.Thread(target=self._loop, daemon=True, name="payout-worker")
         self._thread.start()
 
@@ -63,6 +87,13 @@ class PayoutWorker:
 
     def _run_payouts(self) -> dict[str, Any]:
         dry_run = bool(self.cfg.get("payout_dry_run", False))
+        unresolved = self.db.unresolved_payouts()
+        if unresolved and not dry_run:
+            return {
+                "skipped": True,
+                "reason": "unresolved_payouts",
+                "unresolved": len(unresolved),
+            }
         min_sats = self.min_payout_sats
         payable = self.db.balances_ready_for_payout(min_sats)
         if not payable:
@@ -86,44 +117,41 @@ class PayoutWorker:
                     amount_btx,
                     address[:20],
                 )
-                payout_id = self.db.record_payout(
+                self.db.record_payout(
                     address=address,
                     amount_sats=amount_sats,
                     txid="dry-run",
                     status="dry_run",
                 )
-                self.db.debit_balance(address, amount_sats, payout_id=payout_id)
                 paid += 1
                 total_sats += amount_sats
                 continue
 
+            reservation = self.db.reserve_payout(address, amount_sats)
+            if not reservation:
+                continue
+            payout_id = int(reservation["id"])
+            self.db.mark_payout_sending(payout_id)
             try:
-                txid = self.rpc.send_to_address(address, amount_btx)
+                txid = self.rpc.send_to_address(
+                    address,
+                    amount_btx,
+                    comment=f"btxpool:{reservation['request_id']}",
+                )
             except RpcError as e:
                 msg = f"{address[:16]}: {e.message}"
                 log.error("payout failed %s", msg)
-                self.db.record_payout(
-                    address=address,
-                    amount_sats=amount_sats,
-                    txid="",
-                    status="failed",
-                    error=e.message,
-                )
+                self.db.mark_payout_uncertain(payout_id, e.message)
                 errors.append(msg)
                 continue
             except Exception as e:
                 msg = f"{address[:16]}: {e}"
                 log.error("payout failed %s", msg)
+                self.db.mark_payout_uncertain(payout_id, str(e))
                 errors.append(msg)
                 continue
 
-            payout_id = self.db.record_payout(
-                address=address,
-                amount_sats=amount_sats,
-                txid=str(txid),
-                status="sent",
-            )
-            self.db.debit_balance(address, amount_sats, payout_id=payout_id)
+            self.db.finalize_payout(payout_id, str(txid))
             paid += 1
             total_sats += amount_sats
             log.info("payout sent %.8f BTX -> %s txid=%s", amount_btx, address[:20], txid)

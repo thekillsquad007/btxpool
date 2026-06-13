@@ -29,6 +29,8 @@ class NetworkMonitor:
             "matmul": {"n": 512, "b": 16, "r": 8},
             "target_spacing_sec": 90.0,
             "coinbasevalue": 0,
+            "template_available": False,
+            "template_error": "",
             "synced": False,
             "last_error": "",
             "updated_at": 0.0,
@@ -41,22 +43,45 @@ class NetworkMonitor:
             return dict(self._cache)
 
     def refresh(self) -> None:
+        mining: dict[str, Any] = {}
+        chain: dict[str, Any] = {}
+        gbt: dict[str, Any] = {}
+        base_errors: list[str] = []
+
         try:
             mining = self.rpc.call("getmininginfo", timeout=15.0)
+        except Exception as e:
+            base_errors.append(f"getmininginfo: {self._error_message(e)}")
+            log.debug("network monitor getmininginfo failed: %s", e)
+
+        try:
             chain = self.rpc.call("getblockchaininfo", timeout=15.0)
+        except Exception as e:
+            base_errors.append(f"getblockchaininfo: {self._error_message(e)}")
+            log.debug("network monitor getblockchaininfo failed: %s", e)
+
+        if not mining and not chain:
+            with self._lock:
+                self._cache["last_error"] = "; ".join(base_errors)
+            return
+
+        template_error = ""
+        try:
             gbt = self.rpc.call(
                 "getblocktemplate", [{"rules": ["segwit"]}], timeout=15.0
             )
-        except RpcError as e:
-            with self._lock:
-                self._cache["last_error"] = e.message
-            log.debug("network monitor rpc error: %s", e.message)
-            return
         except Exception as e:
-            with self._lock:
-                self._cache["last_error"] = str(e)
-            log.debug("network monitor failed: %s", e)
-            return
+            template_error = self._error_message(e)
+            log.debug("network monitor getblocktemplate failed: %s", e)
+
+        networkhashps = float(mining.get("networkhashps", 0) or 0)
+        if networkhashps <= 0:
+            try:
+                networkhashps = float(
+                    self.rpc.call("getnetworkhashps", timeout=15.0) or 0
+                )
+            except Exception as e:
+                log.debug("network monitor getnetworkhashps failed: %s", e)
 
         next_info = mining.get("next") or {}
         matmul = {
@@ -74,7 +99,7 @@ class NetworkMonitor:
                 "height": int(chain.get("blocks", mining.get("blocks", 0))),
                 "difficulty": float(chain.get("difficulty", mining.get("difficulty", 0))),
                 "next_difficulty": float(next_info.get("difficulty", 0)),
-                "networkhashps": float(mining.get("networkhashps", 0)),
+                "networkhashps": networkhashps,
                 "target": str(chain.get("target", mining.get("target", ""))),
                 "bits": str(chain.get("bits", mining.get("bits", ""))),
                 "chain": str(chain.get("chain", mining.get("chain", "main"))),
@@ -82,10 +107,18 @@ class NetworkMonitor:
                 "matmul": matmul,
                 "target_spacing_sec": spacing,
                 "coinbasevalue": int(gbt.get("coinbasevalue", 0)),
+                "template_available": bool(gbt),
+                "template_error": template_error,
                 "synced": not chain.get("initialblockdownload", True),
-                "last_error": "",
+                "last_error": "; ".join(base_errors),
                 "updated_at": time.time(),
             })
+
+    @staticmethod
+    def _error_message(error: Exception) -> str:
+        if isinstance(error, RpcError):
+            return error.message
+        return str(error)
 
     def _loop(self) -> None:
         while not self._stop.is_set():

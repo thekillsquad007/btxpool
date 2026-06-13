@@ -2,34 +2,79 @@
 
 from __future__ import annotations
 
+import math
 import time
 from typing import Any
 
 from pool.difficulty import REFERENCE_MATMUL_GATE_PER_S, REFERENCE_POOL_DIFFICULTY
 
+# BTX work profile (epsilon_bits=18): typical post-σ gate pass rate per raw nonce.
+EPSILON18_SIGMA_PASS_RATE = 0.0008553387597203255
+# Calibrated share cadence at REFERENCE_POOL_DIFFICULTY on ~REFERENCE_MATMUL_GATE_PER_S.
+REFERENCE_SHARE_INTERVAL_SEC = 60.0
+
 
 def format_hashrate(hs: float) -> dict[str, Any]:
-    """Return human display value + unit for hashes per second."""
-    if hs <= 0:
-        return {"value": 0, "unit": "H/s", "display": "0 H/s"}
-    units = (
-        (1e12, "TH/s"),
-        (1e9, "GH/s"),
-        (1e6, "MH/s"),
-        (1e3, "kH/s"),
-        (1, "H/s"),
+    """Return post-gate MatMul attempt rate (N/s)."""
+    return _format_rate(hs, "N/s")
+
+
+def format_nonce_rate(nps: float) -> dict[str, Any]:
+    """Return human display value + unit for raw nonce attempts per second."""
+    return _format_rate(nps, "N/s")
+
+
+def _rate_unit_scales(base_unit: str) -> tuple[tuple[float, str], ...]:
+    prefix_unit = base_unit[0]
+    return (
+        (1e12, f"T{prefix_unit}/s"),
+        (1e9, f"G{prefix_unit}/s"),
+        (1e6, f"M{prefix_unit}/s"),
+        (1e3, f"k{prefix_unit}/s"),
+        (1, base_unit),
     )
-    for scale, unit in units:
-        if hs >= scale:
-            value = hs / scale
-            display = f"{value:.2f} {unit}" if value < 100 else f"{value:.0f} {unit}"
-            return {"value": value, "unit": unit, "display": display, "raw": hs}
-    return {"value": hs, "unit": "H/s", "display": f"{hs:.0f} H/s", "raw": hs}
+
+
+def _pick_rate_scale(rate: float, base_unit: str = "N/s") -> tuple[float, str]:
+    for scale, unit in _rate_unit_scales(base_unit):
+        if rate >= scale:
+            return scale, unit
+    return 1, base_unit
+
+
+def _format_rate(rate: float, base_unit: str) -> dict[str, Any]:
+    if rate <= 0:
+        return {"value": 0, "unit": base_unit, "display": f"0 {base_unit}"}
+    scale, unit = _pick_rate_scale(rate, base_unit)
+    value = rate / scale
+    display = f"{value:.2f} {unit}" if value < 100 else f"{value:.0f} {unit}"
+    return {"value": value, "unit": unit, "display": display, "raw": rate}
+
+
+def format_hashrate_like(
+    rate: float,
+    reference_rate: float,
+    base_unit: str = "N/s",
+) -> dict[str, Any]:
+    """Format *rate* using the same unit prefix as *reference_rate*."""
+    if rate <= 0:
+        return {"value": 0, "unit": base_unit, "display": f"0 {base_unit}", "raw": 0.0}
+    scale, unit = _pick_rate_scale(reference_rate, base_unit)
+    value = rate / scale
+    if value < 0.01:
+        display = f"{value:.4f} {unit}"
+    elif value < 100:
+        display = f"{value:.2f} {unit}"
+    else:
+        display = f"{value:.0f} {unit}"
+    return {"value": value, "unit": unit, "display": display, "raw": rate}
 
 
 def format_duration(seconds: float | None) -> dict[str, Any]:
     if seconds is None or seconds <= 0 or seconds == float("inf"):
         return {"seconds": None, "display": "—"}
+    if seconds < 1:
+        return {"seconds": seconds, "display": f"{seconds:.2f}s"}
     sec = int(seconds)
     if sec < 60:
         return {"seconds": sec, "display": f"{sec}s"}
@@ -52,29 +97,162 @@ def work_to_hashrate(total_difficulty: float, window_sec: float) -> float:
     return (total_difficulty * (2**32)) / window_sec
 
 
+def estimate_gate_nps_from_shares(
+    shares: int,
+    window_sec: float,
+    pool_difficulty: float,
+) -> float:
+    """Estimate post-ε gate N/s from accepted-share cadence and pool difficulty."""
+    if shares <= 0 or window_sec <= 0:
+        return 0.0
+    interval = window_sec / shares
+    ref_diff = max(REFERENCE_POOL_DIFFICULTY, 1e-12)
+    diff = max(pool_difficulty, 1e-12)
+    return (
+        REFERENCE_MATMUL_GATE_PER_S
+        * (REFERENCE_SHARE_INTERVAL_SEC / interval)
+        * (ref_diff / diff)
+    )
+
+
+def estimate_gate_nps_from_raw(
+    raw_nps: float,
+    epsilon_bits: int = 18,
+) -> float:
+    """Convert miner-reported raw nonce scan rate to gate-equivalent N/s."""
+    if raw_nps <= 0:
+        return 0.0
+    sigma_rate = _sigma_pass_rate(epsilon_bits)
+    return raw_nps * sigma_rate
+
+
+def _sigma_pass_rate(epsilon_bits: int = 18) -> float:
+    sigma_rate = EPSILON18_SIGMA_PASS_RATE
+    if epsilon_bits != 18:
+        sigma_rate *= 2 ** (18 - epsilon_bits)
+    return sigma_rate
+
+
+def gate_nps_to_network_nps(
+    gate_nps: float,
+    epsilon_bits: int = 18,
+) -> float:
+    """Convert post-ε gate N/s to btxd networkhashps-equivalent raw N/s."""
+    if gate_nps <= 0:
+        return 0.0
+    sigma_rate = _sigma_pass_rate(epsilon_bits)
+    return gate_nps / sigma_rate
+
+
+def estimate_network_nps_from_shares(
+    shares: int,
+    window_sec: float,
+    pool_difficulty: float,
+    epsilon_bits: int = 18,
+) -> float:
+    """Estimate pool N/s on the same scale as btxd ``networkhashps``."""
+    gate_nps = estimate_gate_nps_from_shares(shares, window_sec, pool_difficulty)
+    return gate_nps_to_network_nps(gate_nps, epsilon_bits)
+
+
+def pick_network_hashrate(
+    *,
+    shares: int,
+    window_sec: float,
+    pool_difficulty: float,
+    raw_metrics_nps: float = 0.0,
+    epsilon_bits: int = 18,
+) -> tuple[float, str]:
+    """Choose best network-scale rate (comparable to ``networkhashps``)."""
+    share_network = estimate_network_nps_from_shares(
+        shares, window_sec, pool_difficulty, epsilon_bits
+    )
+    metrics_network = raw_metrics_nps
+    if share_network > 0 and metrics_network > 0:
+        ratio = metrics_network / share_network
+        if 0.2 <= ratio <= 5.0:
+            return metrics_network, "metrics"
+        return share_network, "shares"
+    if metrics_network > 0:
+        return metrics_network, "metrics"
+    if share_network > 0:
+        return share_network, "shares"
+    return 0.0, "none"
+
+
+def pick_gate_hashrate(
+    *,
+    shares: int,
+    window_sec: float,
+    pool_difficulty: float,
+    raw_metrics_nps: float = 0.0,
+    epsilon_bits: int = 18,
+) -> tuple[float, str]:
+    """Choose best gate-rate estimate and label its source."""
+    share_gate = estimate_gate_nps_from_shares(shares, window_sec, pool_difficulty)
+    metrics_gate = estimate_gate_nps_from_raw(raw_metrics_nps, epsilon_bits)
+    if share_gate > 0 and metrics_gate > 0:
+        ratio = metrics_gate / share_gate
+        if 0.2 <= ratio <= 5.0:
+            return metrics_gate, "metrics_gate"
+        return share_gate, "shares"
+    if metrics_gate > 0:
+        return metrics_gate, "metrics_gate"
+    if share_gate > 0:
+        return share_gate, "shares"
+    return 0.0, "none"
+
+
+def annotate_worker_hashrate(
+    row: dict[str, Any],
+    *,
+    shares_10m: int,
+    window_sec: float,
+    pool_difficulty: float,
+    epsilon_bits: int = 18,
+) -> dict[str, Any]:
+    """Add network-scale hashrate fields to a miner row (mutates and returns row)."""
+    raw_nps = float(row.get("hashrate_estimate") or 0)
+    network_hs, _source = pick_network_hashrate(
+        shares=shares_10m,
+        window_sec=window_sec,
+        pool_difficulty=pool_difficulty,
+        raw_metrics_nps=raw_nps,
+        epsilon_bits=epsilon_bits,
+    )
+    share_gate = estimate_gate_nps_from_shares(
+        shares_10m, window_sec, pool_difficulty
+    )
+    row["hashrate"] = format_hashrate(network_hs)
+    row["hashrate_gate"] = format_hashrate(
+        pick_gate_hashrate(
+            shares=shares_10m,
+            window_sec=window_sec,
+            pool_difficulty=pool_difficulty,
+            raw_metrics_nps=raw_nps,
+            epsilon_bits=epsilon_bits,
+        )[0]
+    )
+    row["hashrate_share_10m"] = format_hashrate(
+        gate_nps_to_network_nps(share_gate, epsilon_bits)
+    )
+    if raw_nps > 0:
+        row["hashrate_nonce_reported"] = format_nonce_rate(raw_nps)
+        row["hashrate_gate_reported"] = format_hashrate(
+            estimate_gate_nps_from_raw(raw_nps, epsilon_bits)
+        )
+    return row
+
+
 def shares_to_matmul_hashrate(
     total_difficulty: float,
     window_sec: float,
     pool_difficulty: float,
 ) -> float:
-    """Estimate MatMul H/s from accepted share work (fallback when no miner metrics).
-
-    MatMul pool share targets are calibrated for practical share rates, so the raw
-    Bitcoin ``work * 2^32 / time`` formula over-counts by orders of magnitude.
-    Scale using the reference gate rate at ``REFERENCE_POOL_DIFFICULTY``.
-    """
-    bitcoin_hs = work_to_hashrate(total_difficulty, window_sec)
-    if bitcoin_hs <= 0:
-        return 0.0
-    ref_diff = max(REFERENCE_POOL_DIFFICULTY, 1e-12)
-    diff = max(pool_difficulty, 1e-12)
-    # Bitcoin formula assumes diff maps to 2^32 hashes/share; MatMul shares are
-    # much easier at the same numeric difficulty.
-    bitcoin_at_one_share_per_sec = ref_diff * (2**32)
-    scale = REFERENCE_MATMUL_GATE_PER_S / bitcoin_at_one_share_per_sec
-    # Adjust if vardiff moved session difficulty away from the reference.
-    scale *= ref_diff / diff
-    return bitcoin_hs * scale
+    """Backward-compatible alias — expects a share *count* in total_difficulty."""
+    return estimate_gate_nps_from_shares(
+        int(total_difficulty), window_sec, pool_difficulty
+    )
 
 
 def block_time_seconds(network_difficulty: float, hashrate_hs: float) -> float | None:
@@ -116,6 +294,7 @@ def compute_block_progress(
     round_start_ts: float,
     round_shares: int = 0,
     round_work: float = 0.0,
+    share_target_ratio: float = 0.0,
     last_block: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Estimate how far the pool is through the expected time to find a block.
@@ -159,6 +338,22 @@ def compute_block_progress(
         luck_status = "overdue"
         luck_message = "Past expected time — block could arrive any solve"
 
+    expected_blocks = (
+        round_shares / share_target_ratio
+        if round_shares > 0 and share_target_ratio > 0
+        else elapsed / expected_sec
+    )
+    progress = (1.0 - math.exp(-expected_blocks)) * 100.0
+    remaining = expected_sec
+    median_sec = expected_sec * math.log(2.0)
+    p95_sec = expected_sec * -math.log(0.05)
+    luck_status = "progressing"
+    luck_message = (
+        f"At the current rate: 50% chance within "
+        f"{format_duration(median_sec)['display']}; "
+        f"95% within {format_duration(p95_sec)['display']}"
+    )
+
     last_block_luck = None
     if last_block and last_block.get("luck_percent") is not None:
         last_block_luck = float(last_block["luck_percent"])
@@ -173,8 +368,13 @@ def compute_block_progress(
         "round_elapsed_seconds": elapsed,
         "expected_block_time": format_duration(expected_sec),
         "expected_block_time_seconds": expected_sec,
-        "remaining_block_time": format_duration(remaining if progress < 100 else 0),
-        "remaining_block_time_seconds": remaining if progress < 100 else 0,
+        "median_block_time": format_duration(median_sec),
+        "median_block_time_seconds": median_sec,
+        "p95_block_time": format_duration(p95_sec),
+        "p95_block_time_seconds": p95_sec,
+        "remaining_block_time": format_duration(remaining),
+        "remaining_block_time_seconds": remaining,
+        "expected_blocks": expected_blocks,
         "round_shares": round_shares,
         "round_work": round_work,
         "round_started_at": round_start_ts,
@@ -230,7 +430,9 @@ def build_mining_context(
     if share_interval_sec and easier["ratio"] > 0:
         est_from_shares = share_interval_sec * easier["ratio"]
 
-    est_block_sec = pool_block_sec or est_from_shares
+    # Accepted-share cadence and the exact target ratio provide the most direct
+    # estimate and avoid mixing Bitcoin difficulty units with BTX MatMul gates.
+    est_block_sec = est_from_shares or pool_block_sec
 
     progress = compute_block_progress(
         pool_hashrate_hs=pool_hashrate_hs,
@@ -238,6 +440,7 @@ def build_mining_context(
         round_start_ts=round_start_ts or time.time(),
         round_shares=round_shares,
         round_work=round_work,
+        share_target_ratio=float(easier.get("ratio") or 0),
         last_block=last_block,
     )
 
@@ -248,8 +451,10 @@ def build_mining_context(
         "mining_height": mining_height,
         "chain_tip_height": chain_tip_height,
         "job_id": job.get("job_id", ""),
+        "version": int(job.get("version", 0)),
         "prev_hash": job.get("prev_hash", ""),
         "merkle_root": job.get("merkle_root", ""),
+        "time": int(job.get("time", 0)),
         "bits": job.get("bits", ""),
         "block_target": block_target,
         "share_target": share_target,
@@ -286,7 +491,6 @@ def build_dashboard_stats(
     totals: dict[str, Any],
     job: dict[str, Any] | None,
     pool_hashrate_metrics: float = 0.0,
-    hashrate_source: str = "shares",
 ) -> dict[str, Any]:
     net_hash = float(network.get("networkhashps") or 0)
     net_diff = float(network.get("difficulty") or 0)
@@ -294,36 +498,45 @@ def build_dashboard_stats(
     block_height = int(network.get("height") or 0)
     target_spacing = float(network.get("target_spacing_sec") or 90)
 
-    pool_hash_10m_shares = shares_to_matmul_hashrate(
-        pool_work.get("work_10m", 0),
-        pool_work.get("window_10m", 600),
-        pool_difficulty,
-    )
-    pool_hash_1h_shares = shares_to_matmul_hashrate(
-        pool_work.get("work_1h", 0),
-        pool_work.get("window_1h", 3600),
-        pool_difficulty,
-    )
-    pool_hash_10m = pool_hash_10m_shares
-    pool_hash_1h = pool_hash_1h_shares
-    pool_hash = pool_hash_10m if pool_work.get("shares_10m", 0) >= 3 else pool_hash_1h
-    hashrate_source = "shares"
+    epsilon_bits = int((job or {}).get("epsilon_bits", 18))
+    shares_10m = int(pool_work.get("shares_10m", 0) or 0)
+    shares_1h = int(pool_work.get("shares_1h", 0) or 0)
+    window_10m = float(pool_work.get("window_10m", 600) or 600)
+    window_1h = float(pool_work.get("window_1h", 3600) or 3600)
 
-    # Miners often report raw nonce scan rate (N/s) as solver_nps, not matmul H/s.
-    # Prefer share-work estimates; only trust metrics when they agree (~5× band).
-    if pool_hashrate_metrics > 0:
-        if pool_hash > 0:
-            ratio = pool_hashrate_metrics / pool_hash
-            if 0.2 <= ratio <= 5.0:
-                pool_hash = pool_hashrate_metrics
-                hashrate_source = "metrics"
-        else:
-            pool_hash = pool_hashrate_metrics
-            hashrate_source = "metrics"
+    pool_gate_10m = estimate_gate_nps_from_shares(
+        shares_10m, window_10m, pool_difficulty
+    )
+    pool_gate_1h = estimate_gate_nps_from_shares(
+        shares_1h, window_1h, pool_difficulty
+    )
+    pool_hash_10m = estimate_network_nps_from_shares(
+        shares_10m, window_10m, pool_difficulty, epsilon_bits
+    )
+    pool_hash_1h = estimate_network_nps_from_shares(
+        shares_1h, window_1h, pool_difficulty, epsilon_bits
+    )
+    pick_shares = shares_10m if shares_10m >= 3 else shares_1h
+    pick_window = window_10m if shares_10m >= 3 else window_1h
+    pool_hash, hashrate_source = pick_network_hashrate(
+        shares=pick_shares,
+        window_sec=pick_window,
+        pool_difficulty=pool_difficulty,
+        raw_metrics_nps=pool_hashrate_metrics,
+        epsilon_bits=epsilon_bits,
+    )
+    pool_gate, _gate_source = pick_gate_hashrate(
+        shares=pick_shares,
+        window_sec=pick_window,
+        pool_difficulty=pool_difficulty,
+        raw_metrics_nps=pool_hashrate_metrics,
+        epsilon_bits=epsilon_bits,
+    )
+    metrics_gate = estimate_gate_nps_from_raw(pool_hashrate_metrics, epsilon_bits)
 
     net_block_time = block_time_seconds(net_diff, net_hash)
     pool_block_time = block_time_seconds(net_diff, pool_hash) if pool_hash > 0 else None
-    pool_share_time = block_time_seconds(pool_difficulty, pool_hash) if pool_hash > 0 else None
+    pool_share_time = window_10m / shares_10m if shares_10m > 0 else None
 
     network_pct = (pool_hash / net_hash * 100) if net_hash > 0 and pool_hash > 0 else 0.0
 
@@ -343,9 +556,14 @@ def build_dashboard_stats(
             "target_spacing_sec": target_spacing,
         },
         "pool": {
-            "hashrate": format_hashrate(pool_hash),
-            "hashrate_10m": format_hashrate(pool_hash_10m),
-            "hashrate_1h": format_hashrate(pool_hash_1h),
+            "hashrate": format_hashrate_like(pool_hash, net_hash),
+            "hashrate_10m": format_hashrate_like(pool_hash_10m, net_hash),
+            "hashrate_1h": format_hashrate_like(pool_hash_1h, net_hash),
+            "hashrate_gate": format_hashrate(pool_gate),
+            "hashrate_gate_10m": format_hashrate(pool_gate_10m),
+            "reported_nonce_rate": format_nonce_rate(pool_hashrate_metrics),
+            "reported_gate_rate": format_hashrate(metrics_gate),
+            "epsilon_bits": epsilon_bits,
             "hashrate_source": hashrate_source,
             "difficulty": pool_difficulty,
             "connected_miners": connected_miners,

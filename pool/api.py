@@ -9,19 +9,18 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
 from pool.database import PoolDatabase
 from pool.job_manager import JobManager
 from pool.network_monitor import NetworkMonitor
 from pool.stats import (
+    annotate_worker_hashrate,
     block_find_luck_percent,
     block_time_seconds,
     build_dashboard_stats,
     build_mining_context,
-    format_hashrate,
-    shares_to_matmul_hashrate,
 )
 
 SATS_PER_BTX = 100_000_000
@@ -47,18 +46,77 @@ def create_app(
     stratum_sessions: callable,
     network: NetworkMonitor | None = None,
     payouts=None,
+    stratum_status: callable | None = None,
 ) -> FastAPI:
     app = FastAPI(title=cfg.get("pool_name", "BTX Pool"), version="0.1.0")
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
+    cors_origins = cfg.get("cors_origins") or []
+    if isinstance(cors_origins, str):
+        cors_origins = [
+            origin.strip() for origin in cors_origins.split(",") if origin.strip()
+        ]
+    if cors_origins:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=cors_origins,
+            allow_methods=["GET"],
+            allow_headers=["Accept", "Content-Type"],
+        )
 
     @app.get("/api/health")
     def health():
-        return {"status": "ok"}
+        job_status = jobs.status()
+        capacity = stratum_status() if stratum_status else {}
+        ready = bool(job_status.get("synced") and jobs.current_job)
+        return {
+            "status": "ok" if ready else "degraded",
+            "ready": ready,
+            "chain": job_status,
+            "capacity": capacity,
+            "unresolved_payouts": len(db.unresolved_payouts()),
+        }
+
+    @app.get("/metrics", response_class=PlainTextResponse)
+    def metrics():
+        totals = db.totals()
+        job_status = jobs.status()
+        capacity = stratum_status() if stratum_status else {}
+        ready = 1 if job_status.get("synced") and jobs.current_job else 0
+        lines = [
+            "# HELP btxpool_ready Pool has a current mining job.",
+            "# TYPE btxpool_ready gauge",
+            f"btxpool_ready {ready}",
+            "# HELP btxpool_connected_sessions Connected Stratum sessions.",
+            "# TYPE btxpool_connected_sessions gauge",
+            f"btxpool_connected_sessions {capacity.get('connected_sessions', 0)}",
+            "# HELP btxpool_authorized_sessions Authorized Stratum sessions.",
+            "# TYPE btxpool_authorized_sessions gauge",
+            f"btxpool_authorized_sessions {capacity.get('authorized_sessions', 0)}",
+            "# HELP btxpool_verifier_pending Shares waiting or being verified.",
+            "# TYPE btxpool_verifier_pending gauge",
+            f"btxpool_verifier_pending {capacity.get('verifier_pending', 0)}",
+            "# HELP btxpool_verifier_queue_limit Maximum pending shares.",
+            "# TYPE btxpool_verifier_queue_limit gauge",
+            f"btxpool_verifier_queue_limit {capacity.get('verifier_queue_limit', 0)}",
+            "# HELP btxpool_verifier_average_seconds Average verification latency.",
+            "# TYPE btxpool_verifier_average_seconds gauge",
+            f"btxpool_verifier_average_seconds {float(capacity.get('verifier_average_ms', 0)) / 1000.0}",
+            "# HELP btxpool_verifier_overload_rejections_total Overload rejections.",
+            "# TYPE btxpool_verifier_overload_rejections_total counter",
+            f"btxpool_verifier_overload_rejections_total {capacity.get('verifier_overload_rejections', 0)}",
+            "# HELP btxpool_shares_accepted_total Persisted accepted shares.",
+            "# TYPE btxpool_shares_accepted_total counter",
+            f"btxpool_shares_accepted_total {totals.get('shares', 0)}",
+            "# HELP btxpool_shares_rejected_total Rejected shares.",
+            "# TYPE btxpool_shares_rejected_total counter",
+            f"btxpool_shares_rejected_total {totals.get('rejected_shares', 0)}",
+            "# HELP btxpool_blocks_found_total Pool blocks found.",
+            "# TYPE btxpool_blocks_found_total counter",
+            f"btxpool_blocks_found_total {totals.get('blocks', 0)}",
+            "# HELP btxpool_unresolved_payouts Reserved or uncertain payouts.",
+            "# TYPE btxpool_unresolved_payouts gauge",
+            f"btxpool_unresolved_payouts {len(db.unresolved_payouts())}",
+        ]
+        return "\n".join(lines) + "\n"
 
     @app.get("/api/pool")
     def pool_stats():
@@ -72,9 +130,11 @@ def create_app(
         if job:
             job_info = {
                 "job_id": job.job_id,
+                "version": job.version,
                 "height": job.block_height,
                 "prev_hash": job.prev_hash,
                 "merkle_root": job.merkle_root,
+                "time": job.time,
                 "bits": job.bits,
                 "block_target": job.block_target,
                 "share_target": job.share_target,
@@ -106,7 +166,6 @@ def create_app(
             totals=totals,
             job=job_info,
             pool_hashrate_metrics=pool_hashrate_metrics,
-            hashrate_source="metrics" if pool_hashrate_metrics > 0 else "shares",
         )
         pool_hash_hs = float(dashboard["pool"]["hashrate"].get("raw") or 0)
         net_diff = float(net.get("difficulty") or 0)
@@ -137,6 +196,7 @@ def create_app(
             last_block=last_block_info,
         )
         next_payout = _next_payout_eta(cfg, db)
+        capacity = stratum_status() if stratum_status else {}
         return {
             "name": cfg.get("pool_name", "BTX Pool"),
             "address": cfg.get("pool_address", ""),
@@ -147,6 +207,7 @@ def create_app(
             "payout_interval_hours": cfg.get("payout_interval_hours", 24),
             "next_payout_eta": next_payout,
             "payout_enabled": bool(cfg.get("payout_enabled", True)),
+            "payout_dry_run": bool(cfg.get("payout_dry_run", False)),
             "stratum_port": cfg.get("stratum_port", 3333),
             "algorithm": algorithm,
             "totals": totals,
@@ -159,6 +220,11 @@ def create_app(
                 "target_spacing_sec": net.get("target_spacing_sec", 90),
             },
             "connected_miners": stratum_sessions(),
+            "operations": {
+                "ready": bool(job_status.get("synced") and job),
+                "capacity": capacity,
+                "unresolved_payouts": len(db.unresolved_payouts()),
+            },
             "stats": dashboard,
             "mining": mining,
         }
@@ -167,25 +233,18 @@ def create_app(
     def miners():
         rows = db.list_miners()
         pool_diff = float(jobs.difficulty)
+        epsilon_bits = int(jobs.current_job.epsilon_bits) if jobs.current_job else 18
         for row in rows:
             work_10m = db.worker_work_window(
                 row["address"], row["worker_name"], 600.0
             )
-            share_hs = shares_to_matmul_hashrate(
-                work_10m["work"], work_10m["window_sec"], pool_diff
+            annotate_worker_hashrate(
+                row,
+                shares_10m=work_10m["shares"],
+                window_sec=work_10m["window_sec"],
+                pool_difficulty=pool_diff,
+                epsilon_bits=epsilon_bits,
             )
-            metric_hs = float(row.get("hashrate_estimate") or 0)
-            if share_hs > 0 and metric_hs > 0:
-                ratio = metric_hs / share_hs
-                hs = metric_hs if 0.2 <= ratio <= 5.0 else share_hs
-            elif share_hs > 0:
-                hs = share_hs
-            else:
-                hs = metric_hs
-            row["hashrate"] = format_hashrate(hs)
-            row["hashrate_share_10m"] = format_hashrate(share_hs)
-            if metric_hs > 0 and (share_hs <= 0 or metric_hs / max(share_hs, 1e-9) > 5.0):
-                row["hashrate_nonce_reported"] = format_hashrate(metric_hs)
         return {"miners": rows}
 
     @app.get("/api/shares")
@@ -211,22 +270,18 @@ def create_app(
         balance = db.get_balance(address)
         workers = db.miners_for_address(address)
         pool_diff = float(jobs.difficulty)
+        epsilon_bits = int(jobs.current_job.epsilon_bits) if jobs.current_job else 18
         for row in workers:
             work_10m = db.worker_work_window(
                 row["address"], row["worker_name"], 600.0
             )
-            share_hs = shares_to_matmul_hashrate(
-                work_10m["work"], work_10m["window_sec"], pool_diff
+            annotate_worker_hashrate(
+                row,
+                shares_10m=work_10m["shares"],
+                window_sec=work_10m["window_sec"],
+                pool_difficulty=pool_diff,
+                epsilon_bits=epsilon_bits,
             )
-            metric_hs = float(row.get("hashrate_estimate") or 0)
-            if share_hs > 0 and metric_hs > 0:
-                ratio = metric_hs / share_hs
-                hs = metric_hs if 0.2 <= ratio <= 5.0 else share_hs
-            elif share_hs > 0:
-                hs = share_hs
-            else:
-                hs = metric_hs
-            row["hashrate"] = format_hashrate(hs)
 
         immature = int(balance["immature_sats"]) if balance else 0
         payable = int(balance["balance_sats"]) if balance else 0

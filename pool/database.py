@@ -5,6 +5,7 @@ from __future__ import annotations
 import sqlite3
 import threading
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -18,12 +19,17 @@ def miner_canonical_name(
 
 
 class PoolDatabase:
-    def __init__(self, path: str):
+    def __init__(self, path: str, wal: bool = True):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
         self._conn = sqlite3.connect(self.path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
+        self._conn.execute("PRAGMA busy_timeout=5000")
+        self._conn.execute("PRAGMA foreign_keys=ON")
+        self._conn.execute("PRAGMA synchronous=FULL")
+        if wal:
+            self._conn.execute("PRAGMA journal_mode=WAL")
         self._init_schema()
 
     def _init_schema(self) -> None:
@@ -52,8 +58,17 @@ class PoolDatabase:
                     job_id TEXT NOT NULL,
                     nonce64 TEXT NOT NULL,
                     difficulty REAL NOT NULL,
+                    work REAL NOT NULL DEFAULT 0,
                     is_block INTEGER NOT NULL DEFAULT 0,
                     created_at REAL NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS share_submissions (
+                    job_id TEXT NOT NULL,
+                    ntime INTEGER NOT NULL,
+                    nonce64 TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    PRIMARY KEY (job_id, ntime, nonce64)
                 );
 
                 CREATE TABLE IF NOT EXISTS blocks (
@@ -102,12 +117,14 @@ class PoolDatabase:
 
                 CREATE TABLE IF NOT EXISTS payouts (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    request_id TEXT NOT NULL DEFAULT '',
                     address TEXT NOT NULL,
                     amount_sats INTEGER NOT NULL DEFAULT 0,
                     txid TEXT NOT NULL DEFAULT '',
                     status TEXT NOT NULL DEFAULT 'pending',
                     error TEXT NOT NULL DEFAULT '',
-                    created_at REAL NOT NULL
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL DEFAULT 0
                 );
 
                 CREATE TABLE IF NOT EXISTS pool_stats (
@@ -139,6 +156,14 @@ class PoolDatabase:
             row["name"]: row
             for row in self._conn.execute("PRAGMA table_info(blocks)").fetchall()
         }
+        share_cols = {
+            row["name"]: row
+            for row in self._conn.execute("PRAGMA table_info(shares)").fetchall()
+        }
+        if "work" not in share_cols:
+            self._conn.execute(
+                "ALTER TABLE shares ADD COLUMN work REAL NOT NULL DEFAULT 0"
+            )
         for col, typedef in (
             ("distributable_sats", "INTEGER NOT NULL DEFAULT 0"),
             ("window_work", "REAL NOT NULL DEFAULT 0"),
@@ -147,6 +172,24 @@ class PoolDatabase:
         ):
             if col not in block_cols:
                 self._conn.execute(f"ALTER TABLE blocks ADD COLUMN {col} {typedef}")
+        payout_cols = {
+            row["name"]: row
+            for row in self._conn.execute("PRAGMA table_info(payouts)").fetchall()
+        }
+        if "request_id" not in payout_cols:
+            self._conn.execute(
+                "ALTER TABLE payouts ADD COLUMN request_id TEXT NOT NULL DEFAULT ''"
+            )
+        if "updated_at" not in payout_cols:
+            self._conn.execute(
+                "ALTER TABLE payouts ADD COLUMN updated_at REAL NOT NULL DEFAULT 0"
+            )
+        self._conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_payouts_request
+            ON payouts(request_id) WHERE request_id != ''
+            """
+        )
 
     def _migrate_miners_to_canonical_pk(self) -> None:
         self._conn.executescript("""
@@ -263,6 +306,7 @@ class PoolDatabase:
         valid: bool,
         is_block: bool = False,
         canonical_name: str = "",
+        work: float | None = None,
     ) -> None:
         key = miner_canonical_name(address, worker_name, canonical_name)
         now = time.time()
@@ -280,10 +324,22 @@ class PoolDatabase:
                 )
                 self._conn.execute(
                     """
-                    INSERT INTO shares (address, worker_name, job_id, nonce64, difficulty, is_block, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO shares (
+                        address, worker_name, job_id, nonce64,
+                        difficulty, work, is_block, created_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """,
-                    (address, worker_name, job_id, nonce64, difficulty, int(is_block), now),
+                    (
+                        address,
+                        worker_name,
+                        job_id,
+                        nonce64,
+                        difficulty,
+                        float(difficulty if work is None else work),
+                        int(is_block),
+                        now,
+                    ),
                 )
             else:
                 self._conn.execute(
@@ -296,6 +352,21 @@ class PoolDatabase:
                     (now, key),
                 )
             self._conn.commit()
+
+    def claim_share_submission(self, job_id: str, ntime: int, nonce64: str) -> bool:
+        """Atomically reject duplicate work before expensive verification."""
+        with self._lock:
+            cur = self._conn.execute(
+                """
+                INSERT OR IGNORE INTO share_submissions (
+                    job_id, ntime, nonce64, created_at
+                )
+                VALUES (?, ?, ?, ?)
+                """,
+                (job_id, int(ntime), nonce64, time.time()),
+            )
+            self._conn.commit()
+            return cur.rowcount == 1
 
     def record_metrics(self, canonical_name: str, solver_nps: float) -> None:
         if solver_nps <= 0 or not canonical_name:
@@ -381,7 +452,9 @@ class PoolDatabase:
         with self._lock:
             rows = self._conn.execute(
                 """
-                SELECT address, worker_name, difficulty, created_at
+                SELECT address, worker_name,
+                       CASE WHEN work > 0 THEN work ELSE difficulty END AS work,
+                       created_at
                 FROM shares
                 ORDER BY id DESC
                 """
@@ -390,7 +463,7 @@ class PoolDatabase:
         total = 0.0
         for row in rows:
             selected.append(dict(row))
-            total += float(row["difficulty"])
+            total += float(row["work"])
             if total >= target_work:
                 break
         return selected
@@ -448,6 +521,106 @@ class PoolDatabase:
             self._conn.commit()
             return round_id
 
+    def credit_pplns_round(
+        self,
+        *,
+        height: int,
+        block_hash: str,
+        finder_address: str,
+        reward_sats: int,
+        distributable_sats: int,
+        window_work: float,
+        credits: list[dict[str, Any]],
+    ) -> tuple[int, int]:
+        """Persist block, round, credits, and balances in one transaction."""
+        now = time.time()
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                block_cur = self._conn.execute(
+                    """
+                    INSERT INTO blocks (
+                        height, hash, finder_address, reward_sats,
+                        distributable_sats, window_work, status,
+                        confirmations, created_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, 'immature', 0, ?)
+                    """,
+                    (
+                        height,
+                        block_hash,
+                        finder_address,
+                        reward_sats,
+                        distributable_sats,
+                        window_work,
+                        now,
+                    ),
+                )
+                block_id = int(block_cur.lastrowid)
+                round_cur = self._conn.execute(
+                    """
+                    INSERT INTO mining_rounds (
+                        block_id, height, block_hash, reward_sats,
+                        distributable_sats, window_work, status,
+                        confirmations, created_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, 'immature', 0, ?)
+                    """,
+                    (
+                        block_id,
+                        height,
+                        block_hash,
+                        reward_sats,
+                        distributable_sats,
+                        window_work,
+                        now,
+                    ),
+                )
+                round_id = int(round_cur.lastrowid)
+                amounts: dict[str, int] = {}
+                for credit in credits:
+                    amount = int(credit["amount_sats"])
+                    if amount <= 0:
+                        continue
+                    address = credit["address"]
+                    amounts[address] = amounts.get(address, 0) + amount
+                    self._conn.execute(
+                        """
+                        INSERT INTO round_credits (
+                            round_id, address, worker_name, work, amount_sats
+                        )
+                        VALUES (?, ?, ?, ?, ?)
+                        """,
+                        (
+                            round_id,
+                            address,
+                            credit.get("worker_name", ""),
+                            float(credit["work"]),
+                            amount,
+                        ),
+                    )
+                for address, amount in amounts.items():
+                    self._conn.execute(
+                        """
+                        INSERT INTO miner_balances (
+                            address, immature_sats, balance_sats,
+                            paid_total_sats, updated_at
+                        )
+                        VALUES (?, ?, 0, 0, ?)
+                        ON CONFLICT(address) DO UPDATE SET
+                            immature_sats =
+                                miner_balances.immature_sats
+                                + excluded.immature_sats,
+                            updated_at = excluded.updated_at
+                        """,
+                        (address, amount, now),
+                    )
+                self._conn.commit()
+                return block_id, round_id
+            except Exception:
+                self._conn.rollback()
+                raise
+
     def add_immature_credits(self, credits: dict[str, int]) -> None:
         if not credits:
             return
@@ -474,7 +647,7 @@ class PoolDatabase:
                 """
                 SELECT id, block_id, height, block_hash, status, confirmations
                 FROM mining_rounds
-                WHERE status != 'credited'
+                WHERE status = 'immature'
                 ORDER BY id ASC
                 """
             ).fetchall()
@@ -558,6 +731,55 @@ class PoolDatabase:
             self._conn.commit()
             return len(credits)
 
+    def orphan_round(self, round_id: int) -> int:
+        """Reverse immature credits for a block proven to be orphaned."""
+        now = time.time()
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            round_row = self._conn.execute(
+                "SELECT block_id, status FROM mining_rounds WHERE id = ?",
+                (round_id,),
+            ).fetchone()
+            if not round_row or round_row["status"] in ("orphaned", "credited"):
+                self._conn.rollback()
+                return 0
+            credits = self._conn.execute(
+                """
+                SELECT address, SUM(amount_sats) AS amount
+                FROM round_credits
+                WHERE round_id = ?
+                GROUP BY address
+                """,
+                (round_id,),
+            ).fetchall()
+            for row in credits:
+                self._conn.execute(
+                    """
+                    UPDATE miner_balances
+                    SET immature_sats = MAX(0, immature_sats - ?),
+                        updated_at = ?
+                    WHERE address = ?
+                    """,
+                    (int(row["amount"]), now, row["address"]),
+                )
+            self._conn.execute(
+                """
+                UPDATE mining_rounds
+                SET status = 'orphaned', confirmations = -1
+                WHERE id = ?
+                """,
+                (round_id,),
+            )
+            self._conn.execute(
+                """
+                UPDATE blocks SET status = 'orphaned', confirmations = -1
+                WHERE id = ?
+                """,
+                (int(round_row["block_id"]),),
+            )
+            self._conn.commit()
+            return len(credits)
+
     def balances_ready_for_payout(self, min_sats: int) -> list[dict[str, Any]]:
         with self._lock:
             rows = self._conn.execute(
@@ -583,15 +805,161 @@ class PoolDatabase:
         with self._lock:
             cur = self._conn.execute(
                 """
-                INSERT INTO payouts (address, amount_sats, txid, status, error, created_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO payouts (
+                    request_id, address, amount_sats, txid, status,
+                    error, created_at, updated_at
+                )
+                VALUES ('', ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (address, amount_sats, txid, status, error, time.time()),
+                (
+                    address,
+                    amount_sats,
+                    txid,
+                    status,
+                    error,
+                    time.time(),
+                    time.time(),
+                ),
             )
             self._conn.commit()
             return int(cur.lastrowid)
 
+    def reserve_payout(self, address: str, amount_sats: int) -> dict[str, Any] | None:
+        """Atomically reserve a miner balance before an external wallet call."""
+        if amount_sats <= 0:
+            return None
+        now = time.time()
+        request_id = uuid.uuid4().hex
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            row = self._conn.execute(
+                "SELECT balance_sats FROM miner_balances WHERE address = ?",
+                (address,),
+            ).fetchone()
+            if not row or int(row["balance_sats"]) < amount_sats:
+                self._conn.rollback()
+                return None
+            cur = self._conn.execute(
+                """
+                INSERT INTO payouts (
+                    request_id, address, amount_sats, txid, status,
+                    error, created_at, updated_at
+                )
+                VALUES (?, ?, ?, '', 'reserved', '', ?, ?)
+                """,
+                (request_id, address, amount_sats, now, now),
+            )
+            self._conn.execute(
+                """
+                UPDATE miner_balances SET
+                    balance_sats = balance_sats - ?,
+                    updated_at = ?
+                WHERE address = ?
+                """,
+                (amount_sats, now, address),
+            )
+            self._conn.commit()
+            return {
+                "id": int(cur.lastrowid),
+                "request_id": request_id,
+                "address": address,
+                "amount_sats": amount_sats,
+            }
+
+    def mark_payout_sending(self, payout_id: int) -> None:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE payouts SET status = 'sending', updated_at = ? WHERE id = ?",
+                (time.time(), payout_id),
+            )
+            self._conn.commit()
+
+    def finalize_payout(self, payout_id: int, txid: str) -> None:
+        now = time.time()
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            row = self._conn.execute(
+                "SELECT address, amount_sats, status FROM payouts WHERE id = ?",
+                (payout_id,),
+            ).fetchone()
+            if not row or row["status"] == "sent":
+                self._conn.rollback()
+                return
+            self._conn.execute(
+                """
+                UPDATE payouts
+                SET txid = ?, status = 'sent', error = '', updated_at = ?
+                WHERE id = ?
+                """,
+                (txid, now, payout_id),
+            )
+            self._conn.execute(
+                """
+                UPDATE miner_balances
+                SET paid_total_sats = paid_total_sats + ?, updated_at = ?
+                WHERE address = ?
+                """,
+                (int(row["amount_sats"]), now, row["address"]),
+            )
+            self._conn.commit()
+
+    def mark_payout_uncertain(self, payout_id: int, error: str) -> None:
+        with self._lock:
+            self._conn.execute(
+                """
+                UPDATE payouts
+                SET status = 'uncertain', error = ?, updated_at = ?
+                WHERE id = ? AND status != 'sent'
+                """,
+                (error, time.time(), payout_id),
+            )
+            self._conn.commit()
+
+    def release_payout(self, payout_id: int, error: str) -> bool:
+        """Return a reserved payout to balance after confirmed non-broadcast."""
+        now = time.time()
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            row = self._conn.execute(
+                "SELECT address, amount_sats, status FROM payouts WHERE id = ?",
+                (payout_id,),
+            ).fetchone()
+            if not row or row["status"] not in ("reserved", "failed"):
+                self._conn.rollback()
+                return False
+            self._conn.execute(
+                """
+                UPDATE miner_balances
+                SET balance_sats = balance_sats + ?, updated_at = ?
+                WHERE address = ?
+                """,
+                (int(row["amount_sats"]), now, row["address"]),
+            )
+            self._conn.execute(
+                """
+                UPDATE payouts SET status = 'failed', error = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (error, now, payout_id),
+            )
+            self._conn.commit()
+            return True
+
+    def unresolved_payouts(self) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT id, request_id, address, amount_sats, txid, status,
+                       error, created_at, updated_at
+                FROM payouts
+                WHERE status IN ('reserved', 'sending', 'uncertain')
+                ORDER BY id
+                """
+            ).fetchall()
+            return [dict(row) for row in rows]
+
     def debit_balance(self, address: str, amount_sats: int, payout_id: int = 0) -> None:
+        """Legacy helper retained for migrations and older integrations."""
         now = time.time()
         with self._lock:
             self._conn.execute(
@@ -653,7 +1021,8 @@ class PoolDatabase:
             if address:
                 rows = self._conn.execute(
                     """
-                    SELECT id, address, amount_sats, txid, status, error, created_at
+                    SELECT id, request_id, address, amount_sats, txid, status,
+                           error, created_at, updated_at
                     FROM payouts WHERE address = ?
                     ORDER BY id DESC LIMIT ?
                     """,
@@ -662,7 +1031,8 @@ class PoolDatabase:
             else:
                 rows = self._conn.execute(
                     """
-                    SELECT id, address, amount_sats, txid, status, error, created_at
+                    SELECT id, request_id, address, amount_sats, txid, status,
+                           error, created_at, updated_at
                     FROM payouts ORDER BY id DESC LIMIT ?
                     """,
                     (limit,),
@@ -734,7 +1104,7 @@ class PoolDatabase:
         with self._lock:
             miners = self._conn.execute("SELECT COUNT(*) AS c FROM miners").fetchone()["c"]
             shares = self._conn.execute(
-                "SELECT COUNT(*) AS c, COALESCE(SUM(difficulty), 0) AS work FROM shares"
+                "SELECT COUNT(*) AS c, COALESCE(SUM(work), 0) AS work FROM shares"
             ).fetchone()
             blocks = self._conn.execute("SELECT COUNT(*) AS c FROM blocks").fetchone()["c"]
             invalid = self._conn.execute(
@@ -756,7 +1126,7 @@ class PoolDatabase:
         with self._lock:
             row = self._conn.execute(
                 """
-                SELECT COUNT(*) AS shares, COALESCE(SUM(difficulty), 0) AS work
+                SELECT COUNT(*) AS shares, COALESCE(SUM(work), 0) AS work
                 FROM shares
                 WHERE created_at > ? AND address = ? AND worker_name = ?
                 """,
@@ -773,7 +1143,7 @@ class PoolDatabase:
         with self._lock:
             row = self._conn.execute(
                 """
-                SELECT COUNT(*) AS shares, COALESCE(SUM(difficulty), 0) AS work
+                SELECT COUNT(*) AS shares, COALESCE(SUM(work), 0) AS work
                 FROM shares WHERE created_at > ?
                 """,
                 (cutoff,),
@@ -798,7 +1168,7 @@ class PoolDatabase:
         with self._lock:
             row = self._conn.execute(
                 """
-                SELECT COUNT(*) AS shares, COALESCE(SUM(difficulty), 0) AS work
+                SELECT COUNT(*) AS shares, COALESCE(SUM(work), 0) AS work
                 FROM shares WHERE created_at > ?
                 """,
                 (since_ts,),

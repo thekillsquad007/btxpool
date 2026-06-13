@@ -1,0 +1,23 @@
+[Unit]
+Description=BTX node
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=forking
+User=aravindthana
+Group=aravindthana
+ExecStart=/home/aravindthana/.local/btx/bin/btxd -datadir=/home/aravindthana/.bitcoin -daemon -pid=/run/btxd/btxd.pid
+ExecStop=/home/aravindthana/.local/btx/bin/btx-cli -datadir=/home/aravindthana/.bitcoin -conf=/home/aravindthana/.bitcoin/btx.conf stop
+PIDFile=/run/btxd/btxd.pid
+RuntimeDirectory=btxd
+RuntimeDirectoryMode=0750
+Restart=on-failure
+RestartSec=10
+TimeoutStartSec=180
+TimeoutStopSec=180
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

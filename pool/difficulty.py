@@ -15,7 +15,7 @@ REFERENCE_SHARE_TARGET = int(
 )
 # Typical post-ε gate rate (H/s) for one GPU at REFERENCE_POOL_DIFFICULTY — used to
 # convert Bitcoin-style share work into MatMul H/s when miners omit report_metrics.
-REFERENCE_MATMUL_GATE_PER_S = 250.0
+REFERENCE_MATMUL_GATE_PER_S = (1 << 256) / (REFERENCE_SHARE_TARGET + 1)
 
 
 def difficulty_to_share_target(difficulty: float, network_target_hex: str | None = None) -> str:
@@ -52,6 +52,14 @@ def target_to_difficulty(share_target_hex: str, network_target_hex: str | None =
             ref_divisor = block_target / REFERENCE_SHARE_TARGET
             effective_difficulty = block_target / share
             return effective_difficulty * REFERENCE_POOL_DIFFICULTY / ref_divisor
+    return DIFF1_TARGET / share
+
+
+def target_to_work(share_target_hex: str) -> float:
+    """Return Bitcoin/BTX difficulty-one work represented by a target."""
+    share = int(share_target_hex, 16)
+    if share <= 0:
+        return 0.0
     return DIFF1_TARGET / share
 
 

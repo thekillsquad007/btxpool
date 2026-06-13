@@ -40,12 +40,27 @@ def display_hex_to_le_bytes(hex_str: str) -> bytes:
 
 
 def encode_bip34_height(height: int) -> bytes:
+    """Return minimally encoded script-number bytes for a BIP34 height."""
     out = bytearray()
     value = height
     while value > 0:
         out.append(value & 0xFF)
         value >>= 8
+    if not out:
+        return b""
+    if out[-1] & 0x80:
+        out.append(0)
     return bytes(out)
+
+
+def push_data(data: bytes) -> bytes:
+    if len(data) < 0x4C:
+        return bytes([len(data)]) + data
+    if len(data) <= 0xFF:
+        return b"\x4c" + bytes([len(data)]) + data
+    if len(data) <= 0xFFFF:
+        return b"\x4d" + struct.pack("<H", len(data)) + data
+    raise ValueError("coinbase script item too large")
 
 
 def derive_v2_seed(
@@ -106,21 +121,35 @@ def merkle_root(hashes: list[bytes]) -> bytes:
 
 def txid_from_raw(tx_bytes: bytes) -> bytes:
     if tx_bytes[4:6] == b"\x00\x01":
-        stripped = tx_bytes[:4] + tx_bytes[6:]
-        pos = 4
-        vin_count, pos = _read_varint(stripped, pos)
+        pos = 6
+        vin_start = pos
+        vin_count, pos = _read_varint(tx_bytes, pos)
         for _ in range(vin_count):
             pos += 36
-            slen, pos = _read_varint(stripped, pos)
+            slen, pos = _read_varint(tx_bytes, pos)
             pos += slen
             pos += 4
-        vout_count, pos = _read_varint(stripped, pos)
+        vout_start = pos
+        vout_count, pos = _read_varint(tx_bytes, pos)
         for _ in range(vout_count):
             pos += 8
-            slen, pos = _read_varint(stripped, pos)
+            slen, pos = _read_varint(tx_bytes, pos)
             pos += slen
-        pos += 4
-        legacy = stripped[:pos]
+        vout_end = pos
+        for _ in range(vin_count):
+            item_count, pos = _read_varint(tx_bytes, pos)
+            for _ in range(item_count):
+                item_len, pos = _read_varint(tx_bytes, pos)
+                pos += item_len
+        locktime = tx_bytes[pos : pos + 4]
+        if len(locktime) != 4:
+            raise ValueError("truncated segwit transaction")
+        legacy = (
+            tx_bytes[:4]
+            + tx_bytes[vin_start:vout_start]
+            + tx_bytes[vout_start:vout_end]
+            + locktime
+        )
         return sha256d(legacy)
     return sha256d(tx_bytes)
 
@@ -171,14 +200,14 @@ def _serialize_segwit_tx(
 ) -> bytes:
     tx = bytearray()
     tx += struct.pack("<i", version)
+    if witness_stack is not None:
+        tx += b"\x00\x01"
     tx += varint(1)
     tx += _write_input(script_sig)
     tx += varint(len(outputs))
     for value, script in outputs:
         tx += _write_output(value, script)
     if witness_stack is not None:
-        tx += b"\x00\x01"
-        tx += varint(1)
         tx += _write_witness_stack(witness_stack)
     tx += struct.pack("<I", locktime)
     return bytes(tx)
@@ -209,10 +238,9 @@ def build_coinbase_tx(
     coinbase_value = int(gbt["coinbasevalue"])
     witness_commitment = gbt.get("default_witness_commitment")
 
-    script_sig = bytearray()
+    script_sig = bytearray(push_data(encode_bip34_height(height)))
     for _key, val in sorted((gbt.get("coinbaseaux") or {}).items()):
         script_sig += bytes.fromhex(val)
-    script_sig += encode_bip34_height(height)
     script_sig += extranonce
 
     user_value, dev_value = split_coinbase_value(coinbase_value, dev_fee_bps)
@@ -233,7 +261,7 @@ def _find_witness_commitment_vout(coinbase_tx: bytes) -> tuple[int, int] | None:
     """Return (script_start, script_end) for the OP_RETURN witness commitment vout."""
     if len(coinbase_tx) < 10:
         return None
-    pos = 4
+    pos = 6 if coinbase_tx[4:6] == b"\x00\x01" else 4
     try:
         vin_count, pos = _read_varint(coinbase_tx, pos)
         for _ in range(vin_count):
@@ -327,6 +355,7 @@ def assemble_block_hex(
     *,
     dev_script: bytes | None = None,
     dev_fee_bps: int = 0,
+    matrix_c: list[int] | None = None,
 ) -> str:
     seed_a, seed_b = resolve_header_seeds(job, nonce64)
     coinbase = build_coinbase_tx(
@@ -352,12 +381,25 @@ def assemble_block_hex(
     block += varint(len(tx_raw_list))
     for raw in tx_raw_list:
         block += raw
+    if matrix_c:
+        expected_words = int(job.matmul_n or 512) ** 2
+        if len(matrix_c) != expected_words:
+            raise ValueError(
+                f"matrix_c size {len(matrix_c)} != expected {expected_words}"
+            )
+        block += varint(0)
+        block += varint(0)
+        block += varint(len(matrix_c))
+        for word in matrix_c:
+            if not 0 <= int(word) < 0x7FFFFFFF:
+                raise ValueError("matrix_c contains a non-canonical field element")
+            block += struct.pack("<I", int(word))
     return block.hex()
 
 
 def block_hash_from_hex(block_hex: str) -> str:
     """Return display-order block hash from serialized block hex."""
     raw = bytes.fromhex(block_hex)
-    if len(raw) < 80:
+    if len(raw) < 182:
         raise ValueError("block too short for header")
-    return uint256_to_display_hex(sha256d(raw[:80]))
+    return uint256_to_display_hex(sha256d(raw[:182]))

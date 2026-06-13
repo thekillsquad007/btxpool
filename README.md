@@ -16,7 +16,7 @@ Production-ready self-hosted mining pool for [BTX](https://github.com/btxchain/b
 
 ## Requirements
 
-1. **Synced BTX node** (`btxd` v0.32.3+) with RPC **and wallet** enabled
+1. **Synced BTX node** (`btxd` v0.32.7+) with RPC **and wallet** enabled
 2. **Python 3.10+**
 3. **CPU solver** for share verification (build once from amdbtx)
 4. **Node.js 18+** (to build the frontend)

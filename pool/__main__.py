@@ -38,7 +38,17 @@ async def run_pool(cfg: dict) -> None:
         rpc_password=cfg.get("rpc_password", ""),
         cookie_file=cfg.get("rpc_cookie_file", ""),
     )
-    db = PoolDatabase(cfg.get("database_path", "data/pool.db"))
+    wallet_rpc = BtxRpcClient(
+        url=cfg.get("rpc_url", "http://127.0.0.1:19334"),
+        rpc_user=cfg.get("rpc_user", ""),
+        rpc_password=cfg.get("rpc_password", ""),
+        cookie_file=cfg.get("rpc_cookie_file", ""),
+        wallet=cfg.get("rpc_wallet", ""),
+    )
+    db = PoolDatabase(
+        cfg.get("database_path", "data/pool.db"),
+        wal=bool(cfg.get("database_wal", True)),
+    )
     jobs = JobManager(cfg, rpc)
     network = NetworkMonitor(
         rpc, interval=float(cfg.get("network_stats_interval", 30.0))
@@ -48,6 +58,8 @@ async def run_pool(cfg: dict) -> None:
         solver_path=cfg.get("solver_path", ""),
         backend=cfg.get("solver_backend", "cpu"),
         runtime_ld_path=cfg.get("solver_runtime_ld_path", ""),
+        batch_size=cfg.get("solver_batch_size", 1),
+        workers=cfg.get("solver_workers", 4),
     )
     if not validator.available:
         logging.getLogger(__name__).warning(
@@ -56,7 +68,7 @@ async def run_pool(cfg: dict) -> None:
         )
 
     pplns = PplnsEngine(db, cfg, rpc)
-    payouts = PayoutWorker(db, rpc, cfg)
+    payouts = PayoutWorker(db, wallet_rpc, cfg)
 
     def network_difficulty() -> float:
         snap = network.snapshot()
@@ -112,7 +124,15 @@ async def run_pool(cfg: dict) -> None:
     def session_count():
         return len(stratum._sessions)
 
-    app = create_app(cfg, db, jobs, session_count, network, payouts)
+    app = create_app(
+        cfg,
+        db,
+        jobs,
+        session_count,
+        network,
+        payouts,
+        stratum_status=stratum.status,
+    )
     config = uvicorn.Config(
         app,
         host=cfg.get("api_host", "0.0.0.0"),
@@ -151,6 +171,7 @@ async def run_pool(cfg: dict) -> None:
     payouts.stop()
     jobs.stop()
     network.stop()
+    validator.close()
     await stratum.stop()
     server.should_exit = True
     await api_task

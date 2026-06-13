@@ -1,5 +1,5 @@
 # Run in PowerShell AS ADMINISTRATOR on the Windows host.
-# Forwards LAN / Netbird traffic on :3333 and :8080 into WSL where btxpool runs.
+# Forwards Stratum and the LAN-only dashboard into WSL where btxpool runs.
 # Re-run after WSL restarts (WSL IP can change).
 
 param(
@@ -38,19 +38,26 @@ foreach ($p in $ports) {
 }
 
 if ($isAdmin) {
-    foreach ($p in $ports) {
-        $rule = "BTX Pool TCP $p"
-        Remove-NetFirewallRule -DisplayName $rule -ErrorAction SilentlyContinue
-        New-NetFirewallRule -DisplayName $rule -Direction Inbound -LocalPort $p -Protocol TCP -Action Allow -ErrorAction Stop | Out-Null
-        Write-Host "[OK]   Firewall rule: $rule" -ForegroundColor Green
-    }
+    $stratumRule = "BTX Pool TCP 3333"
+    Remove-NetFirewallRule -DisplayName $stratumRule -ErrorAction SilentlyContinue
+    New-NetFirewallRule -DisplayName $stratumRule -Direction Inbound `
+        -LocalPort 3333 -Protocol TCP -Action Allow -Profile Any `
+        -ErrorAction Stop | Out-Null
+    Write-Host "[OK]   Public firewall rule: $stratumRule" -ForegroundColor Green
+
+    $apiRule = "BTX Pool TCP 8080"
+    Remove-NetFirewallRule -DisplayName $apiRule -ErrorAction SilentlyContinue
+    New-NetFirewallRule -DisplayName $apiRule -Direction Inbound `
+        -LocalPort 8080 -Protocol TCP -Action Allow -Profile Private `
+        -RemoteAddress LocalSubnet -ErrorAction Stop | Out-Null
+    Write-Host "[OK]   LAN-only firewall rule: $apiRule" -ForegroundColor Green
 } else {
     Write-Host "[SKIP] Firewall rules (requires Administrator)" -ForegroundColor Yellow
 }
 
 Write-Host ""
 Write-Host "Miners on LAN:  stratum+tcp://${LanIp}:3333"
-Write-Host "Dashboard:      http://${LanIp}:8080"
+Write-Host "Dashboard (LAN only): http://${LanIp}:8080"
 Write-Host "Netbird mesh:   stratum+tcp://NETBIRD_PEER_IP:3333"
 Write-Host "Netbird public: stratum+tcp://btx.eu1.netbird.services:46449"
 Write-Host ""
