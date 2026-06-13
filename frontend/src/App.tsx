@@ -104,7 +104,7 @@ interface PoolData {
   payment_mode?: string;
   min_payout_btx?: number;
   payout_interval_hours?: number;
-  payout_initial_delay_hours?: number;
+  payout_schedule_utc?: string;
   coinbase_maturity?: number;
   payout_max_address_btx?: number;
   payout_daily_limit_btx?: number;
@@ -275,6 +275,7 @@ interface WalletData {
   }>;
   min_payout_btx: number;
   payout_interval_hours: number;
+  payout_schedule_utc?: string;
   next_payout_eta: number;
   pool_fee_percent: number;
   payment_mode: string;
@@ -348,7 +349,7 @@ function WalletDashboard({ address }: { address: string }) {
             <div className="hero-card network">
               <span className="hero-label">Next payout</span>
               <span className="hero-value">{nextPayout}</span>
-              <span className="hero-sub">Every {wallet.payout_interval_hours}h</span>
+              <span className="hero-sub">Daily at {wallet.payout_schedule_utc ?? "00:00"} UTC</span>
             </div>
           </section>
 
@@ -933,8 +934,8 @@ export default function App() {
           <ConnectRow label="Password" value="x (or empty)" />
         </div>
         <p className="payment-note">
-          {pool?.payment_mode?.toUpperCase() ?? "PPLNS"} payouts every{" "}
-          {pool?.payout_interval_hours ?? 24}h · min {pool?.min_payout_btx ?? 5} BTX · fee{" "}
+          {pool?.payment_mode?.toUpperCase() ?? "PPLNS"} payouts daily at{" "}
+          {pool?.payout_schedule_utc ?? "00:00"} UTC · min {pool?.min_payout_btx ?? 5} BTX · fee{" "}
           {pool?.fee_percent ?? 1}%
         </p>
         <p className="payment-note payout-safeguards">
@@ -1087,8 +1088,8 @@ btx-miner --pool stratum+tcp://${host}:${pool?.stratum_port ?? 3333} \\
           Pool address: <code>{pool?.address ? truncate(pool.address, 10) : "—"}</code>
         </span>
         <span>
-          {pool?.payment_mode?.toUpperCase() ?? "PPLNS"} · Fee {pool?.fee_percent ?? 0}% · Payouts every{" "}
-          {pool?.payout_interval_hours ?? 24}h
+          {pool?.payment_mode?.toUpperCase() ?? "PPLNS"} · Fee {pool?.fee_percent ?? 0}% · Payouts daily at{" "}
+          {pool?.payout_schedule_utc ?? "00:00"} UTC
         </span>
         <a href="https://github.com/btxchain/btx" target="_blank" rel="noreferrer">
           BTX Chain

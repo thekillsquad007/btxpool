@@ -36,7 +36,9 @@ coinbase_maturity: 200
 
 # Payouts every 24 hours, minimum 5 BTX
 payout_interval_hours: 24
-payout_initial_delay_hours: 24
+# Fixed daily payout schedule in UTC (00:00 = midnight UTC).
+payout_hour_utc: 0
+payout_minute_utc: 0
 min_payout_sats: 500000000
 # New-chain safety limits: partial payouts, rolling daily cap, and fee reserve.
 payout_max_address_sats: 2500000000

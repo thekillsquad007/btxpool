@@ -4,7 +4,7 @@
 
 - The live wallet is encrypted and automatic payouts are enabled.
 - The wallet is currently unfunded, so no payout can be sent yet.
-- Keep the payout caps, 24-hour initial delay, 200-confirmation maturity,
+- Keep the payout caps, daily 00:00 UTC schedule, 200-confirmation maturity,
   wallet reserve, and chain guard enabled.
 - Do not restart WSL while BTX snapshot background validation is active.
 - Keep the BTX mining chain guard enabled.
@@ -129,8 +129,7 @@ Before changing `payout_dry_run`:
 Current new-chain safety policy:
 
 - 200 confirmations before miner credits become payable
-- 24-hour delay after pool startup before the first payout cycle
-- 24 hours between payout cycles
+- one payout cycle daily at 00:00 UTC
 - 25 BTX maximum per address per cycle
 - 100 BTX maximum across all payouts in a rolling 24-hour window
 - 1 BTX retained in the hot wallet for fees and recovery

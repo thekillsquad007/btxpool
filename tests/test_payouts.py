@@ -1,8 +1,10 @@
 """Payout safety tests."""
 
+from datetime import datetime, timezone
+
 from pool.btx_rpc import BtxRpcClient
 from pool.database import PoolDatabase
-from pool.payouts import PayoutWorker
+from pool.payouts import PayoutWorker, next_daily_run_utc
 
 
 class NoRpc:
@@ -34,6 +36,18 @@ class AmbiguousRpc:
 
     def send_to_address(self, address: str, amount: float, comment: str = "") -> str:
         raise TimeoutError("wallet response timed out")
+
+
+def test_next_daily_run_is_midnight_utc():
+    now = datetime(2026, 6, 14, 18, 30, tzinfo=timezone.utc).timestamp()
+    expected = datetime(2026, 6, 15, 0, 0, tzinfo=timezone.utc).timestamp()
+    assert next_daily_run_utc(now) == expected
+
+
+def test_next_daily_run_does_not_repeat_current_boundary():
+    now = datetime(2026, 6, 15, 0, 0, tzinfo=timezone.utc).timestamp()
+    expected = datetime(2026, 6, 16, 0, 0, tzinfo=timezone.utc).timestamp()
+    assert next_daily_run_utc(now) == expected
 
 
 def test_dry_run_does_not_debit_balance(tmp_path):

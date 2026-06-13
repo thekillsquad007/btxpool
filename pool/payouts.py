@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +15,16 @@ from pool.database import PoolDatabase
 log = logging.getLogger(__name__)
 
 SATS_PER_BTX = 100_000_000
+
+
+def next_daily_run_utc(now: float, hour: int = 0, minute: int = 0) -> float:
+    hour = min(23, max(0, int(hour)))
+    minute = min(59, max(0, int(minute)))
+    current = datetime.fromtimestamp(now, timezone.utc)
+    candidate = current.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if candidate <= current:
+        candidate += timedelta(days=1)
+    return candidate.timestamp()
 
 
 class PayoutWorker:
@@ -26,20 +37,12 @@ class PayoutWorker:
         self._lock = threading.Lock()
         self._next_run_at: float | None = None
 
-    @property
-    def interval_sec(self) -> float:
-        hours = float(self.cfg.get("payout_interval_hours", 24))
-        return max(3600.0, hours * 3600.0)
-
-    @property
-    def initial_delay_sec(self) -> float:
-        hours = float(
-            self.cfg.get(
-                "payout_initial_delay_hours",
-                self.cfg.get("payout_interval_hours", 24),
-            )
+    def _next_scheduled_run(self, now: float | None = None) -> float:
+        return next_daily_run_utc(
+            time.time() if now is None else now,
+            int(self.cfg.get("payout_hour_utc", 0)),
+            int(self.cfg.get("payout_minute_utc", 0)),
         )
-        return max(120.0, hours * 3600.0)
 
     @property
     def min_payout_sats(self) -> int:
@@ -77,7 +80,11 @@ class PayoutWorker:
                 "payout worker blocked: %d unresolved payout(s) require reconciliation",
                 len(unresolved),
             )
-        self._next_run_at = time.time() + self.initial_delay_sec
+        self._next_run_at = self._next_scheduled_run()
+        log.info(
+            "next payout cycle scheduled for %s",
+            datetime.fromtimestamp(self._next_run_at, timezone.utc).isoformat(),
+        )
         self._thread = threading.Thread(target=self._loop, daemon=True, name="payout-worker")
         self._thread.start()
 
@@ -87,14 +94,15 @@ class PayoutWorker:
             self._thread.join(timeout=5.0)
 
     def _loop(self) -> None:
-        self._stop.wait(self.initial_delay_sec)
         while not self._stop.is_set():
+            self._next_run_at = self._next_scheduled_run()
+            delay = max(0.0, self._next_run_at - time.time())
+            if self._stop.wait(delay):
+                break
             try:
                 self.run_once()
             except Exception as e:
                 log.error("payout cycle error: %s", e)
-            self._next_run_at = time.time() + self.interval_sec
-            self._stop.wait(self.interval_sec)
 
     def run_once(self) -> dict[str, Any]:
         if not self.cfg.get("payout_enabled", True):

@@ -15,6 +15,7 @@ from fastapi.staticfiles import StaticFiles
 from pool.database import PoolDatabase
 from pool.job_manager import JobManager
 from pool.network_monitor import NetworkMonitor
+from pool.payouts import next_daily_run_utc
 from pool.stats import (
     annotate_worker_hashrate,
     block_find_luck_percent,
@@ -32,15 +33,11 @@ def _next_payout_eta(
 ) -> float | None:
     if payouts and payouts.next_run_at:
         return float(payouts.next_run_at)
-    last = db.get_stat("last_payout_at", "")
-    if not last:
-        return None
-    try:
-        last_ts = float(last)
-    except ValueError:
-        return None
-    interval = float(cfg.get("payout_interval_hours", 24)) * 3600.0
-    return last_ts + interval
+    return next_daily_run_utc(
+        time.time(),
+        int(cfg.get("payout_hour_utc", 0)),
+        int(cfg.get("payout_minute_utc", 0)),
+    )
 
 
 def _share_quality(row: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -232,7 +229,10 @@ def create_app(
             "payment_mode": cfg.get("payment_mode", "pplns"),
             "min_payout_btx": int(cfg.get("min_payout_sats", 500_000_000)) / SATS_PER_BTX,
             "payout_interval_hours": cfg.get("payout_interval_hours", 24),
-            "payout_initial_delay_hours": cfg.get("payout_initial_delay_hours", 24),
+            "payout_schedule_utc": (
+                f"{int(cfg.get('payout_hour_utc', 0)):02d}:"
+                f"{int(cfg.get('payout_minute_utc', 0)):02d}"
+            ),
             "coinbase_maturity": cfg.get("coinbase_maturity", 200),
             "payout_max_address_btx": int(
                 cfg.get("payout_max_address_sats", 2_500_000_000)
@@ -345,8 +345,6 @@ def create_app(
         payable = int(balance["balance_sats"]) if balance else 0
         paid_total = int(balance["paid_total_sats"]) if balance else 0
         next_payout = _next_payout_eta(cfg, db, payouts)
-        if next_payout is None:
-            next_payout = time.time() + float(cfg.get("payout_interval_hours", 24)) * 3600.0
 
         return {
             "address": address,
@@ -363,6 +361,10 @@ def create_app(
             "pool_fee_percent": cfg.get("pool_fee_percent", 0),
             "min_payout_btx": int(cfg.get("min_payout_sats", 500_000_000)) / SATS_PER_BTX,
             "payout_interval_hours": cfg.get("payout_interval_hours", 24),
+            "payout_schedule_utc": (
+                f"{int(cfg.get('payout_hour_utc', 0)):02d}:"
+                f"{int(cfg.get('payout_minute_utc', 0)):02d}"
+            ),
             "next_payout_eta": next_payout,
         }
 
