@@ -1107,10 +1107,41 @@ class PoolDatabase:
     def recent_blocks(self, limit: int = 20) -> list[dict[str, Any]]:
         with self._lock:
             rows = self._conn.execute(
-                "SELECT height, hash, finder_address, reward_sats, created_at FROM blocks ORDER BY id DESC LIMIT ?",
+                """
+                SELECT height, hash, finder_address, reward_sats,
+                       distributable_sats, status, confirmations, created_at
+                FROM blocks ORDER BY id DESC LIMIT ?
+                """,
                 (limit,),
             ).fetchall()
             return [dict(r) for r in rows]
+
+    def block_summary(self) -> dict[str, Any]:
+        with self._lock:
+            counts = self._conn.execute(
+                """
+                SELECT
+                    COUNT(*) AS total,
+                    SUM(CASE WHEN status = 'immature' THEN 1 ELSE 0 END) AS immature,
+                    SUM(CASE WHEN status = 'credited' THEN 1 ELSE 0 END) AS credited,
+                    SUM(CASE WHEN status = 'orphaned' THEN 1 ELSE 0 END) AS orphaned
+                FROM blocks
+                """
+            ).fetchone()
+            latest = self._conn.execute(
+                """
+                SELECT height, hash, finder_address, reward_sats,
+                       distributable_sats, status, confirmations, created_at
+                FROM blocks ORDER BY id DESC LIMIT 1
+                """
+            ).fetchone()
+            return {
+                "total": int(counts["total"] or 0),
+                "immature": int(counts["immature"] or 0),
+                "credited": int(counts["credited"] or 0),
+                "orphaned": int(counts["orphaned"] or 0),
+                "latest": dict(latest) if latest else None,
+            }
 
     def totals(self) -> dict[str, Any]:
         with self._lock:
@@ -1170,7 +1201,8 @@ class PoolDatabase:
         with self._lock:
             row = self._conn.execute(
                 """
-                SELECT height, hash, finder_address, reward_sats, created_at
+                SELECT height, hash, finder_address, reward_sats,
+                       distributable_sats, status, confirmations, created_at
                 FROM blocks ORDER BY id DESC LIMIT 1
                 """
             ).fetchone()

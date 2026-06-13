@@ -120,6 +120,7 @@ interface PoolData {
     blocks: number;
     rejected_shares: number;
   };
+  blocks?: BlockSummary;
   chain: {
     synced: boolean;
     height: number;
@@ -181,7 +182,18 @@ interface Block {
   hash: string;
   finder_address: string;
   reward_sats: number;
+  distributable_sats: number;
+  status: string;
+  confirmations: number;
   created_at: number;
+}
+
+interface BlockSummary {
+  total: number;
+  immature: number;
+  credited: number;
+  orphaned: number;
+  latest: Block | null;
 }
 
 function formatBtx(sats: number): string {
@@ -403,10 +415,12 @@ function WalletDashboard({ address }: { address: string }) {
 
 export default function App() {
   const walletAddress = walletFromPath();
+  const monitoringPath = /^\/monitoring\/?$/i.test(window.location.pathname);
   const [pool, setPool] = useState<PoolData | null>(null);
   const [miners, setMiners] = useState<Miner[]>([]);
   const [shares, setShares] = useState<Share[]>([]);
   const [blocks, setBlocks] = useState<Block[]>([]);
+  const [blockSummary, setBlockSummary] = useState<BlockSummary | null>(null);
   const [error, setError] = useState("");
   const [lookupAddress, setLookupAddress] = useState("");
 
@@ -423,6 +437,7 @@ export default function App() {
         setMiners(m.miners);
         setShares(s.shares);
         setBlocks(b.blocks);
+        setBlockSummary(b.summary ?? null);
         setError("");
       } catch {
         setError("Cannot reach pool API — is btxpool running?");
@@ -455,18 +470,25 @@ export default function App() {
     : pool?.payout_dry_run
       ? "Dry run"
       : "Automatic";
+  const latestBlock = blockSummary?.latest ?? pool?.blocks?.latest ?? null;
+  const blocksFound =
+    blockSummary?.total ?? pool?.blocks?.total ?? pool?.totals.blocks ?? 0;
 
   return (
-    <div className="app">
+    <div className={`app ${monitoringPath ? "monitoring-view" : "public-view"}`}>
       <header className="header">
         <div className="brand">
-          <div className="logo">⛏</div>
+          <div className="logo">BTX</div>
           <div>
             <h1>{pool?.name ?? "BTX Pool"}</h1>
-            <p className="subtitle">{pool?.algorithm ?? "MatMul PoW"} · Self-hosted</p>
+            <p className="subtitle">{pool?.algorithm ?? "MatMul PoW"} · PPLNS mining</p>
           </div>
         </div>
         <div className="header-meta">
+          <nav className="page-nav" aria-label="Pool navigation">
+            <a className={!monitoringPath ? "active" : ""} href="/">Pool</a>
+            <a className={monitoringPath ? "active" : ""} href="/monitoring">Monitoring</a>
+          </nav>
           <div className="status-pill">
             <span className={`dot ${pool?.chain.synced ? "online" : "syncing"}`} />
             {pool?.chain.synced ? "Mining active" : "Waiting for btxd sync"}
@@ -482,6 +504,17 @@ export default function App() {
         <div className="banner warn">{pool.chain.last_error}</div>
       )}
 
+      {monitoringPath && (
+        <section className="monitoring-intro">
+          <div>
+            <span className="eyebrow">Operations console</span>
+            <h2>Pool monitoring</h2>
+            <p>Node state, verifier capacity, share quality, mining targets, and recent submissions.</p>
+          </div>
+          <a className="secondary-action" href="/">Back to public pool page</a>
+        </section>
+      )}
+
       <section className="production-hero">
         <div className="production-copy">
           <span className="eyebrow">BTX MatMul mining pool</span>
@@ -492,7 +525,7 @@ export default function App() {
           </p>
           <div className="hero-actions">
             <a className="primary-action" href="#connect">Connect a miner</a>
-            <a className="secondary-action" href="#pool-health">Pool health</a>
+            <a className="secondary-action" href="/monitoring">View monitoring</a>
           </div>
         </div>
         <div className="production-endpoint">
@@ -562,6 +595,53 @@ export default function App() {
           <span className="hero-label">Block reward</span>
           <span className="hero-value success">{blockReward ? `${formatBtx(blockReward)} BTX` : "—"}</span>
           <span className="hero-sub">Height {pool?.chain.height?.toLocaleString() ?? "—"}</span>
+        </div>
+      </section>
+
+      <section className={`block-proof ${latestBlock ? "found" : "waiting"}`}>
+        <div className="block-proof-main">
+          <span className="eyebrow">Pool block record</span>
+          {latestBlock ? (
+            <>
+              <h2>Block #{latestBlock.height.toLocaleString()} found by this pool</h2>
+              <p>
+                Accepted into pool accounting {timeAgo(latestBlock.created_at)}.
+                The hash below is the unique proof of this pool's block submission.
+              </p>
+              <code className="block-hash">
+                {latestBlock.hash || "Hash pending node confirmation"}
+              </code>
+            </>
+          ) : (
+            <>
+              <h2>No pool block found yet</h2>
+              <p>
+                Valid shares are being counted, but none has met the network block
+                target. This card will show the accepted hash and finder immediately
+                after a hit.
+              </p>
+            </>
+          )}
+        </div>
+        <div className="block-proof-stats">
+          <div>
+            <span>Total found</span>
+            <strong>{blocksFound}</strong>
+          </div>
+          <div>
+            <span>Status</span>
+            <strong className={latestBlock?.status === "orphaned" ? "danger" : latestBlock ? "success" : ""}>
+              {latestBlock ? latestBlock.status : "Waiting"}
+            </strong>
+          </div>
+          <div>
+            <span>Confirmations</span>
+            <strong>{latestBlock ? latestBlock.confirmations : "—"}</strong>
+          </div>
+          <div>
+            <span>Reward</span>
+            <strong>{latestBlock ? `${formatBtx(latestBlock.reward_sats)} BTX` : "—"}</strong>
+          </div>
         </div>
       </section>
 
@@ -815,7 +895,7 @@ export default function App() {
           {pool?.payout_interval_hours ?? 24}h · min {pool?.min_payout_btx ?? 5} BTX · fee{" "}
           {pool?.fee_percent ?? 1}%
         </p>
-        <p className="payment-note">
+        <p className="payment-note payout-safeguards">
           New-chain safeguards: {pool?.coinbase_maturity ?? 200} confirmations,{" "}
           {pool?.payout_max_address_btx ?? 25} BTX max per address,{" "}
           {pool?.payout_daily_limit_btx ?? 100} BTX daily pool limit, and{" "}
@@ -919,30 +999,42 @@ btx-miner --pool stratum+tcp://${host}:${pool?.stratum_port ?? 3333} \\
         </Panel>
       </div>
 
-      {blocks.length > 0 && (
-        <Panel title="Blocks found">
-          <table>
-            <thead>
-              <tr>
-                <th>Height</th>
-                <th>Finder</th>
-                <th>Reward</th>
-                <th>When</th>
-              </tr>
-            </thead>
-            <tbody>
-              {blocks.map((b, i) => (
-                <tr key={i}>
-                  <td>{b.height}</td>
-                  <td className="mono">{truncate(b.finder_address, 8)}</td>
-                  <td className="success">{formatBtx(b.reward_sats)} BTX</td>
-                  <td className="muted">{timeAgo(b.created_at)}</td>
+      <section className="blocks-history">
+        <Panel title="Pool block history">
+          {blocks.length === 0 ? (
+            <EmptyState text="No blocks found by this pool yet" />
+          ) : (
+            <table>
+              <thead>
+                <tr>
+                  <th>Height</th>
+                  <th>Block hash</th>
+                  <th>Finder</th>
+                  <th>Reward</th>
+                  <th>Status</th>
+                  <th>Confs</th>
+                  <th>When</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {blocks.map((b, i) => (
+                  <tr key={i}>
+                    <td>{b.height}</td>
+                    <td className="mono">{truncateHex(b.hash, 10, 8)}</td>
+                    <td className="mono">{truncate(b.finder_address, 8)}</td>
+                    <td className="success">{formatBtx(b.reward_sats)} BTX</td>
+                    <td className={b.status === "orphaned" ? "danger" : "success"}>
+                      {b.status}
+                    </td>
+                    <td>{b.confirmations}</td>
+                    <td className="muted">{timeAgo(b.created_at)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
         </Panel>
-      )}
+      </section>
 
       <footer className="footer">
         <span>

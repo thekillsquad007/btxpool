@@ -55,3 +55,22 @@ def test_orphan_round_reverses_immature_credit(tmp_path):
     assert db.orphan_round(round_id) == 1
     assert db.get_balance("btx1miner")["immature_sats"] == 0
     assert db.recent_rounds()[0]["status"] == "orphaned"
+    assert db.block_summary()["orphaned"] == 1
+
+
+def test_block_summary_identifies_latest_pool_block(tmp_path):
+    db = PoolDatabase(str(tmp_path / "pool.db"))
+    db.record_block(
+        height=321,
+        block_hash="ab" * 32,
+        finder_address="btx1finder",
+        reward_sats=500_000_000,
+    )
+
+    summary = db.block_summary()
+    assert summary["total"] == 1
+    assert summary["immature"] == 1
+    assert summary["credited"] == 0
+    assert summary["orphaned"] == 0
+    assert summary["latest"]["height"] == 321
+    assert summary["latest"]["hash"] == "ab" * 32

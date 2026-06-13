@@ -201,6 +201,7 @@ def create_app(
         )
         next_payout = _next_payout_eta(cfg, db, payouts)
         capacity = stratum_status() if stratum_status else {}
+        block_summary = db.block_summary()
         return {
             "name": cfg.get("pool_name", "BTX Pool"),
             "address": cfg.get("pool_address", ""),
@@ -226,6 +227,7 @@ def create_app(
             "stratum_port": cfg.get("stratum_port", 3333),
             "algorithm": algorithm,
             "totals": totals,
+            "blocks": block_summary,
             "chain": {
                 **job_status,
                 "network_difficulty": net.get("difficulty", job_status.get("difficulty")),
@@ -268,7 +270,10 @@ def create_app(
 
     @app.get("/api/blocks")
     def blocks(limit: int = 20):
-        return {"blocks": db.recent_blocks(limit)}
+        return {
+            "summary": db.block_summary(),
+            "blocks": db.recent_blocks(limit),
+        }
 
     @app.get("/api/rounds")
     def rounds(limit: int = 20):

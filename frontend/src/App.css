@@ -38,11 +38,15 @@
 .logo {
   width: 52px;
   height: 52px;
-  background: linear-gradient(135deg, var(--accent), #6366f1);
-  border-radius: 14px;
+  background: linear-gradient(145deg, #4f8cff, #2458bd);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 13px;
   display: grid;
   place-items: center;
-  font-size: 1.5rem;
+  font-size: 0.82rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  box-shadow: 0 12px 30px rgba(37, 99, 199, 0.22);
 }
 
 .brand h1 {
@@ -65,6 +69,29 @@
   padding: 0.5rem 1rem;
   border-radius: 999px;
   font-size: 0.875rem;
+}
+
+.page-nav {
+  display: flex;
+  align-items: center;
+  padding: 0.25rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: rgba(18, 24, 32, 0.75);
+}
+
+.page-nav a {
+  padding: 0.45rem 0.75rem;
+  border-radius: 7px;
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.page-nav a.active {
+  color: var(--text);
+  background: var(--surface-2);
 }
 
 .dot {
@@ -123,6 +150,28 @@
     linear-gradient(145deg, rgba(61, 139, 253, 0.1), transparent 55%),
     var(--surface);
   padding: clamp(1.4rem, 3vw, 2.2rem);
+}
+
+.monitoring-intro {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 1.5rem;
+  margin-bottom: 1.25rem;
+  padding: 1.5rem;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: var(--surface);
+}
+
+.monitoring-intro h2 {
+  margin: 0.35rem 0;
+  font-size: 1.75rem;
+}
+
+.monitoring-intro p {
+  color: var(--muted);
+  line-height: 1.5;
 }
 
 .eyebrow,
@@ -309,6 +358,124 @@
 .hero-sub {
   color: var(--muted);
   font-size: 0.82rem;
+}
+
+.block-proof {
+  display: grid;
+  grid-template-columns: minmax(0, 1.5fr) minmax(320px, 0.75fr);
+  gap: 1.25rem;
+  padding: clamp(1.4rem, 3vw, 2rem);
+  margin-bottom: 1.5rem;
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  background: var(--surface);
+  overflow: hidden;
+  position: relative;
+}
+
+.block-proof::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 4px;
+  background: var(--muted);
+}
+
+.block-proof.found {
+  border-color: rgba(52, 211, 153, 0.32);
+  background:
+    linear-gradient(135deg, rgba(52, 211, 153, 0.08), transparent 58%),
+    var(--surface);
+}
+
+.block-proof.found::before {
+  background: var(--success);
+}
+
+.block-proof-main h2 {
+  margin: 0.45rem 0 0.55rem;
+  font-size: clamp(1.35rem, 3vw, 2rem);
+  letter-spacing: -0.025em;
+}
+
+.block-proof-main p {
+  max-width: 680px;
+  color: var(--muted);
+  line-height: 1.55;
+}
+
+.block-hash {
+  display: block;
+  margin-top: 1rem;
+  padding: 0.75rem 0.9rem;
+  border: 1px solid rgba(52, 211, 153, 0.24);
+  border-radius: 9px;
+  background: rgba(0, 0, 0, 0.18);
+  color: var(--success);
+  overflow-wrap: anywhere;
+}
+
+.block-proof-stats {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.75rem;
+}
+
+.block-proof-stats div {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 0.25rem;
+  min-height: 82px;
+  padding: 0.9rem;
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  background: rgba(0, 0, 0, 0.14);
+}
+
+.block-proof-stats span {
+  color: var(--muted);
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.block-proof-stats strong {
+  font-size: 1.1rem;
+  text-transform: capitalize;
+  font-variant-numeric: tabular-nums;
+}
+
+.blocks-history {
+  margin-bottom: 1.5rem;
+}
+
+.public-view .operations-strip,
+.public-view .mining-work,
+.public-view .insight-row,
+.public-view .stats-grid,
+.public-view .payout-safeguards,
+.public-view .job-pill,
+.public-view .panels > .panel:nth-child(2) {
+  display: none;
+}
+
+.public-view .panels {
+  grid-template-columns: 1fr;
+}
+
+.monitoring-view .production-hero,
+.monitoring-view .hero-stats,
+.monitoring-view .block-proof,
+.monitoring-view .luck-card,
+.monitoring-view .connect-card,
+.monitoring-view .blocks-history,
+.monitoring-view .panels > .panel:first-child {
+  display: none;
+}
+
+.monitoring-view .panels {
+  grid-template-columns: 1fr;
 }
 
 .luck-card {
@@ -869,6 +1036,10 @@ tr:last-child td {
   .operations-strip {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+
+  .block-proof {
+    grid-template-columns: 1fr;
+  }
 }
 
 @media (max-width: 560px) {
@@ -883,5 +1054,18 @@ tr:last-child td {
   .production-copy,
   .production-endpoint {
     padding: 1.25rem;
+  }
+
+  .header-meta,
+  .monitoring-intro {
+    align-items: stretch;
+  }
+
+  .monitoring-intro {
+    flex-direction: column;
+  }
+
+  .block-proof-stats {
+    grid-template-columns: 1fr 1fr;
   }
 }
