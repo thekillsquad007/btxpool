@@ -59,12 +59,17 @@ if ($isAdmin) {
         -ErrorAction Stop | Out-Null
     Write-Host "[OK]   Public node rule: $nodeRule" -ForegroundColor Green
 
-    $legacyHttpsRule = "BTX Pool HTTPS TCP 80 443"
-    Remove-NetFirewallRule -DisplayName $legacyHttpsRule -ErrorAction SilentlyContinue
-    $httpsRule = "BTX Pool HTTPS TCP 8443"
+    $legacyHttpsRules = @(
+        "BTX Pool HTTPS TCP 80 443",
+        "BTX Pool HTTPS TCP 8443"
+    )
+    foreach ($legacyHttpsRule in $legacyHttpsRules) {
+        Remove-NetFirewallRule -DisplayName $legacyHttpsRule -ErrorAction SilentlyContinue
+    }
+    $httpsRule = "BTX Pool HTTPS TCP 9443"
     Remove-NetFirewallRule -DisplayName $httpsRule -ErrorAction SilentlyContinue
     New-NetFirewallRule -DisplayName $httpsRule -Direction Inbound `
-        -LocalPort 8443 -Protocol TCP -Action Allow -Profile Any `
+        -LocalPort 9443 -Protocol TCP -Action Allow -Profile Any `
         -ErrorAction Stop | Out-Null
     Write-Host "[OK]   Public HTTPS rule: $httpsRule" -ForegroundColor Green
 } else {
@@ -74,7 +79,7 @@ if ($isAdmin) {
 Write-Host ""
 Write-Host "Miners on LAN:  stratum+tcp://${LanIp}:3333"
 Write-Host "Dashboard (LAN only): http://${LanIp}:8080"
-Write-Host "Dashboard (public):   https://btxfamilypool.duckdns.org:8443"
+Write-Host "Dashboard (public):   https://btxfamilypool.duckdns.org:9443"
 Write-Host "Netbird mesh:   stratum+tcp://NETBIRD_PEER_IP:3333"
 Write-Host "Netbird public: stratum+tcp://btx.eu1.netbird.services:46449"
 Write-Host ""

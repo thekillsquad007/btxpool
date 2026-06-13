@@ -2,7 +2,7 @@
 	auto_https disable_redirects
 }
 
-https://btxfamilypool.duckdns.org:8443 {
+https://btxfamilypool.duckdns.org:9443 {
 	tls {
 		dns duckdns {env.DUCKDNS_API_TOKEN}
 	}

@@ -106,14 +106,14 @@ The public hostname is:
 btxfamilypool.duckdns.org
 ```
 
-HTTPS is terminated by Caddy on Windows port 8443 and proxied to the pool API
+HTTPS is terminated by Caddy on Windows port 9443 and proxied to the pool API
 at `127.0.0.1:8080`. Caddy obtains and renews the public certificate through
 the DuckDNS DNS challenge. The DuckDNS token is stored outside Git beside the
 Caddy binary with user-only Windows ACLs. Run
 `scripts/wsl-port-forward.ps1` from an elevated PowerShell prompt to create
-the Windows TCP 8443 firewall rule, and forward router TCP 8443 to the
+the Windows TCP 9443 firewall rule, and forward router TCP 9443 to the
 Windows host. The public dashboard URL is
-`https://btxfamilypool.duckdns.org:8443`.
+`https://btxfamilypool.duckdns.org:9443`.
 
 ## Node release
 
