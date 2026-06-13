@@ -1,0 +1,11 @@
+[Unit]
+Description=Back up the encrypted BTX pool wallet
+After=btxd.service
+
+[Service]
+Type=oneshot
+User=aravindthana
+Group=aravindthana
+WorkingDirectory=/mnt/e/Business/btxpool
+Environment=BTXPOOL_CONFIG=/mnt/e/Business/btxpool/config.yaml
+ExecStart=/mnt/e/Business/btxpool/scripts/backup-wallet.sh

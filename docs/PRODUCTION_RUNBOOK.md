@@ -2,8 +2,10 @@
 
 ## Current safety state
 
-- Keep `payout_dry_run: true` until the node wallet is created, backed up,
-  funded, and tested.
+- The live wallet is encrypted and automatic payouts are enabled.
+- The wallet is currently unfunded, so no payout can be sent yet.
+- Keep the payout caps, 24-hour initial delay, 200-confirmation maturity,
+  wallet reserve, and chain guard enabled.
 - Do not restart WSL while BTX snapshot background validation is active.
 - Keep the BTX mining chain guard enabled.
 
@@ -13,16 +15,18 @@ WSL systemd must be enabled only during an approved maintenance window.
 After snapshot validation completes:
 
 ```bash
-sudo cp deploy/systemd/*.service deploy/systemd/*.timer /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now btxd btxpool btxpool-backup.timer btxpool-health.timer
+bash scripts/install-systemd.sh
 ```
 
 Verify:
 
 ```bash
 systemctl status btxd btxpool
-systemctl list-timers btxpool-backup.timer btxpool-health.timer
+systemctl list-timers \
+  btxpool-backup.timer \
+  btxpool-wallet-backup.timer \
+  btxpool-health.timer \
+  btxpool-peers.timer
 curl -fsS http://127.0.0.1:8080/api/health
 curl -fsS http://127.0.0.1:8080/metrics
 ```
@@ -44,6 +48,31 @@ bash scripts/backup-db.sh
 Backups are integrity checked, kept under
 `~/.local/share/btxpool/backups`, and retained for 14 days by default.
 Copy encrypted backups to a second machine or object store.
+
+Create and verify an encrypted wallet backup:
+
+```bash
+bash scripts/backup-wallet.sh
+```
+
+Wallet backups are kept under
+`~/.local/share/btxpool/wallet-backups` for 30 days. The script requires
+both protected passphrase files, verifies that the recovered PQ descriptors
+contain their seed material, creates a native wallet backup and encrypted
+bundle archive, and locks the wallet before returning. A pruned node may
+report `scan_incomplete`; that warning does not replace the seed checks.
+
+## Peer monitoring
+
+Run the near-tip check manually:
+
+```bash
+bash scripts/ensure-peers.sh
+```
+
+When no connected peer is within six blocks of the local tip, the check asks
+the node to reconnect to the official BTX fallback peers. It does not disable
+the mining chain guard or select a competing chain.
 
 ## Payout activation
 
@@ -69,6 +98,8 @@ Current new-chain safety policy:
 - 25 BTX maximum per address per cycle
 - 100 BTX maximum across all payouts in a rolling 24-hour window
 - 1 BTX retained in the hot wallet for fees and recovery
+- automatic sends remain suspended by the node chain guard during peer or
+  chain-consensus anomalies
 
 ## Incident response
 
