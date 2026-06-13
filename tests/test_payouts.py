@@ -1,5 +1,6 @@
 """Payout safety tests."""
 
+from pool.btx_rpc import BtxRpcClient
 from pool.database import PoolDatabase
 from pool.payouts import PayoutWorker
 
@@ -13,12 +14,24 @@ class NoRpc:
 
 
 class SuccessfulRpc:
+    def call(self, method: str, params: list, timeout: float = 0):
+        return None
+
+    def get_wallet_balance(self) -> float:
+        return 1000.0
+
     def send_to_address(self, address: str, amount: float, comment: str = "") -> str:
         assert comment.startswith("btxpool:")
         return "txid-1"
 
 
 class AmbiguousRpc:
+    def call(self, method: str, params: list, timeout: float = 0):
+        return None
+
+    def get_wallet_balance(self) -> float:
+        return 1000.0
+
     def send_to_address(self, address: str, amount: float, comment: str = "") -> str:
         raise TimeoutError("wallet response timed out")
 
@@ -42,8 +55,10 @@ def test_dry_run_does_not_debit_balance(tmp_path):
             "payout_enabled": True,
             "payout_dry_run": True,
             "min_payout_sats": 500_000_000,
+            "wallet_passphrase_file": str(tmp_path / "passphrase"),
         },
     )
+    (tmp_path / "passphrase").write_text("test")
     result = worker.run_once()
     assert result["paid"] == 1
     assert db.get_balance("btx1test")["balance_sats"] == 600_000_000
@@ -72,8 +87,10 @@ def test_successful_payout_reserves_then_finalizes(tmp_path):
             "payout_enabled": True,
             "payout_dry_run": False,
             "min_payout_sats": 500_000_000,
+            "wallet_passphrase_file": str(tmp_path / "passphrase"),
         },
     )
+    (tmp_path / "passphrase").write_text("test")
     result = worker.run_once()
     assert result["paid"] == 1
     balance = db.get_balance("btx1test")
@@ -84,6 +101,8 @@ def test_successful_payout_reserves_then_finalizes(tmp_path):
 
 def test_ambiguous_payout_is_not_retried_or_returned_to_balance(tmp_path):
     db = _payable_db(tmp_path)
+    secret = tmp_path / "passphrase"
+    secret.write_text("test")
     worker = PayoutWorker(
         db,
         AmbiguousRpc(),
@@ -91,6 +110,7 @@ def test_ambiguous_payout_is_not_retried_or_returned_to_balance(tmp_path):
             "payout_enabled": True,
             "payout_dry_run": False,
             "min_payout_sats": 500_000_000,
+            "wallet_passphrase_file": str(secret),
         },
     )
     result = worker.run_once()
@@ -100,3 +120,38 @@ def test_ambiguous_payout_is_not_retried_or_returned_to_balance(tmp_path):
     retry = worker.run_once()
     assert retry["skipped"] is True
     assert retry["reason"] == "unresolved_payouts"
+
+
+def test_wallet_rpc_url_has_no_trailing_slash():
+    rpc = BtxRpcClient(
+        "http://127.0.0.1:19334",
+        "user",
+        "password",
+        wallet="pool",
+    )
+    assert rpc.url == "http://127.0.0.1:19334/wallet/pool"
+
+
+def test_payout_caps_amount_per_address(tmp_path):
+    db = _payable_db(tmp_path)
+    db._conn.execute(
+        "UPDATE miner_balances SET balance_sats = 5000000000 WHERE address = 'btx1test'"
+    )
+    db._conn.commit()
+    secret = tmp_path / "passphrase"
+    secret.write_text("test")
+    worker = PayoutWorker(
+        db,
+        SuccessfulRpc(),
+        {
+            "payout_enabled": True,
+            "payout_dry_run": False,
+            "min_payout_sats": 500_000_000,
+            "payout_max_address_sats": 2_500_000_000,
+            "payout_daily_limit_sats": 10_000_000_000,
+            "wallet_passphrase_file": str(secret),
+        },
+    )
+    result = worker.run_once()
+    assert result["total_sats"] == 2_500_000_000
+    assert db.get_balance("btx1test")["balance_sats"] == 2_500_000_000

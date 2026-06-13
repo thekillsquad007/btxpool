@@ -958,6 +958,18 @@ class PoolDatabase:
             ).fetchall()
             return [dict(row) for row in rows]
 
+    def payouts_sent_since(self, since_ts: float) -> int:
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT COALESCE(SUM(amount_sats), 0) AS total
+                FROM payouts
+                WHERE status = 'sent' AND created_at >= ?
+                """,
+                (since_ts,),
+            ).fetchone()
+            return int(row["total"])
+
     def debit_balance(self, address: str, amount_sats: int, payout_id: int = 0) -> None:
         """Legacy helper retained for migrations and older integrations."""
         now = time.time()

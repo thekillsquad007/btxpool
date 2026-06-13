@@ -61,6 +61,15 @@ Before changing `payout_dry_run`:
 5. Reconcile any payout with status `reserved`, `sending`, or `uncertain`.
 6. Run at least one complete dry-run maturity and payout cycle.
 
+Current new-chain safety policy:
+
+- 200 confirmations before miner credits become payable
+- 24-hour delay after pool startup before the first payout cycle
+- 24 hours between payout cycles
+- 25 BTX maximum per address per cycle
+- 100 BTX maximum across all payouts in a rolling 24-hour window
+- 1 BTX retained in the hot wallet for fees and recovery
+
 ## Incident response
 
 - No job: inspect `/api/health`, node peers, header lag, and chain guard.

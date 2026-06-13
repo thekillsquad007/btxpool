@@ -27,7 +27,11 @@ SATS_PER_BTX = 100_000_000
 WALLET_ADDRESS_RE = re.compile(r"^btx1[a-z0-9]{50,120}$", re.IGNORECASE)
 
 
-def _next_payout_eta(cfg: dict[str, Any], db: PoolDatabase) -> float | None:
+def _next_payout_eta(
+    cfg: dict[str, Any], db: PoolDatabase, payouts=None
+) -> float | None:
+    if payouts and payouts.next_run_at:
+        return float(payouts.next_run_at)
     last = db.get_stat("last_payout_at", "")
     if not last:
         return None
@@ -195,7 +199,7 @@ def create_app(
             round_work=round_stats["work"],
             last_block=last_block_info,
         )
-        next_payout = _next_payout_eta(cfg, db)
+        next_payout = _next_payout_eta(cfg, db, payouts)
         capacity = stratum_status() if stratum_status else {}
         return {
             "name": cfg.get("pool_name", "BTX Pool"),
@@ -205,6 +209,17 @@ def create_app(
             "payment_mode": cfg.get("payment_mode", "pplns"),
             "min_payout_btx": int(cfg.get("min_payout_sats", 500_000_000)) / SATS_PER_BTX,
             "payout_interval_hours": cfg.get("payout_interval_hours", 24),
+            "payout_initial_delay_hours": cfg.get("payout_initial_delay_hours", 24),
+            "coinbase_maturity": cfg.get("coinbase_maturity", 200),
+            "payout_max_address_btx": int(
+                cfg.get("payout_max_address_sats", 2_500_000_000)
+            ) / SATS_PER_BTX,
+            "payout_daily_limit_btx": int(
+                cfg.get("payout_daily_limit_sats", 10_000_000_000)
+            ) / SATS_PER_BTX,
+            "payout_wallet_reserve_btx": int(
+                cfg.get("payout_wallet_reserve_sats", 100_000_000)
+            ) / SATS_PER_BTX,
             "next_payout_eta": next_payout,
             "payout_enabled": bool(cfg.get("payout_enabled", True)),
             "payout_dry_run": bool(cfg.get("payout_dry_run", False)),
@@ -286,7 +301,7 @@ def create_app(
         immature = int(balance["immature_sats"]) if balance else 0
         payable = int(balance["balance_sats"]) if balance else 0
         paid_total = int(balance["paid_total_sats"]) if balance else 0
-        next_payout = _next_payout_eta(cfg, db)
+        next_payout = _next_payout_eta(cfg, db, payouts)
         if next_payout is None:
             next_payout = time.time() + float(cfg.get("payout_interval_hours", 24)) * 3600.0
 

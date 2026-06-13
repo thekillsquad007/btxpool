@@ -18,6 +18,7 @@ rpc_url: "http://127.0.0.1:19334"
 # rpc_url: "http://127.0.0.1:19334"
 rpc_cookie_file: "~/.bitcoin/.cookie"
 rpc_wallet: "pool"
+wallet_passphrase_file: "~/.local/share/btxpool/secrets/wallet-passphrase"
 # rpc_user: ""
 # rpc_password: ""
 
@@ -29,11 +30,16 @@ payment_mode: "pplns"
 pool_fee_percent: 1.0
 dev_fee_address: "btx1z0069dewdztkwnrxx97lt9c5paynh0nynegqxq2kgykh0ct8xaggq0953gx"
 pplns_window_multiplier: 2.0
-coinbase_maturity: 150
+coinbase_maturity: 200
 
 # Payouts every 24 hours, minimum 5 BTX
 payout_interval_hours: 24
+payout_initial_delay_hours: 24
 min_payout_sats: 500000000
+# New-chain safety limits: partial payouts, rolling daily cap, and fee reserve.
+payout_max_address_sats: 2500000000
+payout_daily_limit_sats: 10000000000
+payout_wallet_reserve_sats: 100000000
 payout_enabled: false
 payout_dry_run: true
 

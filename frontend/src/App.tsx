@@ -103,6 +103,11 @@ interface PoolData {
   payment_mode?: string;
   min_payout_btx?: number;
   payout_interval_hours?: number;
+  payout_initial_delay_hours?: number;
+  coinbase_maturity?: number;
+  payout_max_address_btx?: number;
+  payout_daily_limit_btx?: number;
+  payout_wallet_reserve_btx?: number;
   next_payout_eta?: number | null;
   payout_enabled?: boolean;
   payout_dry_run?: boolean;
@@ -522,7 +527,7 @@ export default function App() {
           label="Payout mode"
           value={payoutStatus}
           tone={pool?.payout_enabled && !pool?.payout_dry_run ? "good" : "neutral"}
-          note={`${pool?.payment_mode?.toUpperCase() ?? "PPLNS"} / ${pool?.fee_percent ?? 0}% fee / ${pool?.min_payout_btx ?? 5} BTX min`}
+          note={`${pool?.coinbase_maturity ?? 200} confirmations / ${pool?.min_payout_btx ?? 5} BTX min / ${pool?.payout_max_address_btx ?? 25} BTX cap`}
         />
       </section>
 
@@ -809,6 +814,12 @@ export default function App() {
           {pool?.payment_mode?.toUpperCase() ?? "PPLNS"} payouts every{" "}
           {pool?.payout_interval_hours ?? 24}h · min {pool?.min_payout_btx ?? 5} BTX · fee{" "}
           {pool?.fee_percent ?? 1}%
+        </p>
+        <p className="payment-note">
+          New-chain safeguards: {pool?.coinbase_maturity ?? 200} confirmations,{" "}
+          {pool?.payout_max_address_btx ?? 25} BTX max per address,{" "}
+          {pool?.payout_daily_limit_btx ?? 100} BTX daily pool limit, and{" "}
+          {pool?.payout_wallet_reserve_btx ?? 1} BTX wallet reserve.
         </p>
         <form
           className="wallet-lookup"

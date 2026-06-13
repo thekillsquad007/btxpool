@@ -34,7 +34,9 @@ class BtxRpcClient:
         base_url = url.rstrip("/")
         if wallet:
             base_url += "/wallet/" + urllib.parse.quote(wallet, safe="")
-        self.url = base_url + "/"
+            self.url = base_url
+        else:
+            self.url = base_url + "/"
         self.timeout = timeout
         self._msg_id = 0
         self._auth_header = self._build_auth(rpc_user, rpc_password, cookie_file)
