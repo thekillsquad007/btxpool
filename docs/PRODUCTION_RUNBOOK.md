@@ -106,14 +106,19 @@ The public hostname is:
 btxfamilypool.duckdns.org
 ```
 
-HTTPS is terminated by Caddy on Windows port 9443 and proxied to the pool API
-at `127.0.0.1:8080`. Caddy obtains and renews the public certificate through
-the DuckDNS DNS challenge. The DuckDNS token is stored outside Git beside the
-Caddy binary with user-only Windows ACLs. Run
-`scripts/wsl-port-forward.ps1` from an elevated PowerShell prompt to create
-the Windows TCP 9443 firewall rule, and forward router TCP 9443 to the
-Windows host. The public dashboard URL is
-`https://btxfamilypool.duckdns.org:9443`.
+The production dashboard should use a named Cloudflare Tunnel to
+`http://127.0.0.1:8080`. It uses outbound-only connections and therefore does
+not require router forwarding or a Windows inbound firewall rule. Store the
+remotely managed tunnel token outside Git at
+`%LOCALAPPDATA%\btxpool\cloudflared\tunnel-token`, restrict its ACL to the
+operator account, and run `scripts/install-windows-tasks.ps1` to install the
+hidden supervisor task.
+
+Quick `trycloudflare.com` tunnels are suitable only for connectivity testing:
+their hostname changes on restart and Cloudflare does not provide an uptime
+guarantee. A stable public hostname requires a domain managed by Cloudflare
+and a named tunnel with a published application route to
+`http://127.0.0.1:8080`.
 
 ## Node release
 

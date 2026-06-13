@@ -40,12 +40,12 @@ function Set-BtxTask {
         -Force | Out-Null
 }
 
-function Set-CaddyTask {
+function Set-CloudflaredTask {
     param(
         [Microsoft.Management.Infrastructure.CimInstance]$Trigger
     )
 
-    $script = Join-Path $PSScriptRoot "start-caddy-hidden.ps1"
+    $script = Join-Path $PSScriptRoot "start-cloudflared-hidden.ps1"
     $arguments = @(
         "-NoProfile",
         "-NonInteractive",
@@ -61,11 +61,11 @@ function Set-CaddyTask {
         -Hidden `
         -StartWhenAvailable
     Register-ScheduledTask `
-        -TaskName "BTX Pool HTTPS" `
+        -TaskName "BTX Pool Cloudflare Tunnel" `
         -Action $action `
         -Trigger $Trigger `
         -Settings $settings `
-        -Description "BTX Family Pool HTTPS reverse proxy" `
+        -Description "BTX Family Pool Cloudflare Tunnel" `
         -Force | Out-Null
 }
 
@@ -87,7 +87,15 @@ Set-BtxTask "BTX Pool Wallet Backup" `
     "backup-wallet.sh" $daily
 Set-BtxTask "BTX Pool Peer Check" `
     "ensure-peers.sh" $everyFiveMinutes
-Set-CaddyTask $everyFiveMinutes
+$tunnelToken = Join-Path $env:LOCALAPPDATA "btxpool\cloudflared\tunnel-token"
+if (Test-Path -LiteralPath $tunnelToken) {
+    Set-CloudflaredTask $everyFiveMinutes
+    Unregister-ScheduledTask -TaskName "BTX Pool HTTPS" `
+        -Confirm:$false -ErrorAction SilentlyContinue
+} else {
+    Write-Warning "Cloudflare tunnel token is missing: $tunnelToken"
+    Write-Warning "The Cloudflare tunnel task was not installed."
+}
 
 Get-ScheduledTask -TaskName "BTX Pool *" |
     Select-Object TaskName, State |
