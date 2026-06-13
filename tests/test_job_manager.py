@@ -1,5 +1,6 @@
 """Stratum job lifetime behavior."""
 
+from pool.btx_rpc import RpcError
 from pool.job_manager import JobManager
 
 
@@ -85,3 +86,29 @@ def test_same_job_id_keeps_original_broadcast_seeds():
 
     assert first is second
     assert second.seed_a == "22" * 32
+
+
+def test_template_failure_invalidates_old_jobs():
+    class GuardedRpc(RefreshingSeedRpc):
+        def call(self, method, params=None, timeout=None):
+            if method == "getblocktemplate" and getattr(self, "guarded", False):
+                raise RpcError(-9, "insufficient_peer_consensus")
+            return super().call(method, params, timeout)
+
+    rpc = GuardedRpc()
+    manager = JobManager(
+        {
+            "pool_address": "btx1test",
+            "dev_fee_address": "",
+            "default_difficulty": 0.001,
+        },
+        rpc,
+    )
+    old_job = manager.refresh(clean=True, longpoll=False)
+    assert old_job is not None
+
+    rpc.guarded = True
+    assert manager.refresh(clean=False, longpoll=False) is None
+    assert manager.current_job is None
+    assert manager.get_job(old_job.job_id) is None
+    assert manager.status()["last_error"] == "insufficient_peer_consensus"

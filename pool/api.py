@@ -80,7 +80,11 @@ def create_app(
     def health():
         job_status = jobs.status()
         capacity = stratum_status() if stratum_status else {}
-        ready = bool(job_status.get("synced") and jobs.current_job)
+        ready = bool(
+            job_status.get("synced")
+            and jobs.current_job
+            and not job_status.get("last_error")
+        )
         return {
             "status": "ok" if ready else "degraded",
             "ready": ready,
@@ -221,6 +225,7 @@ def create_app(
         block_summary = db.block_summary()
         return {
             "name": cfg.get("pool_name", "BTX Pool"),
+            "public_hostname": cfg.get("public_hostname", ""),
             "address": cfg.get("pool_address", ""),
             "fee_percent": cfg.get("pool_fee_percent", 0),
             "dev_fee_address": cfg.get("dev_fee_address", ""),

@@ -98,6 +98,7 @@ interface MiningContext {
 
 interface PoolData {
   name: string;
+  public_hostname?: string;
   address: string;
   fee_percent: number;
   payment_mode?: string;
@@ -478,7 +479,8 @@ export default function App() {
     return <WalletDashboard address={walletAddress} />;
   }
 
-  const host = window.location.hostname || "YOUR_SERVER_IP";
+  const host =
+    pool?.public_hostname || window.location.hostname || "YOUR_SERVER_IP";
   const stats = pool?.stats;
   const mining = pool?.mining;
   const netShare = stats?.pool.network_share_percent ?? 0;

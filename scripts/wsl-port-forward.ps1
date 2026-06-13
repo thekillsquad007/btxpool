@@ -23,7 +23,7 @@ if (-not $isAdmin) {
 $wslIp = (wsl hostname -I 2>$null).Trim().Split(" ")[0]
 if (-not $wslIp) { throw "Could not read WSL IP. Is WSL running?" }
 
-$ports = @(3333, 8080)
+$ports = @(3333, 8080, 19335)
 
 Write-Host "WSL IP: $wslIp"
 
@@ -51,6 +51,13 @@ if ($isAdmin) {
         -LocalPort 8080 -Protocol TCP -Action Allow -Profile Private `
         -RemoteAddress LocalSubnet -ErrorAction Stop | Out-Null
     Write-Host "[OK]   LAN-only firewall rule: $apiRule" -ForegroundColor Green
+
+    $nodeRule = "BTX Node TCP 19335"
+    Remove-NetFirewallRule -DisplayName $nodeRule -ErrorAction SilentlyContinue
+    New-NetFirewallRule -DisplayName $nodeRule -Direction Inbound `
+        -LocalPort 19335 -Protocol TCP -Action Allow -Profile Any `
+        -ErrorAction Stop | Out-Null
+    Write-Host "[OK]   Public node rule: $nodeRule" -ForegroundColor Green
 } else {
     Write-Host "[SKIP] Firewall rules (requires Administrator)" -ForegroundColor Yellow
 }

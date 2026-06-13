@@ -300,6 +300,12 @@ class StratumServer:
         nonce64: int,
         difficulty: float,
     ) -> dict[str, Any]:
+        if self.jobs.current_job is None:
+            return {
+                "accepted": False,
+                "error": "Mining paused; waiting for a safe chain template",
+                "error_code": 21,
+            }
         job = self.jobs.get_job(job_id)
         if not job:
             log.info(

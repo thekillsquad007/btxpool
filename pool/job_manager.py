@@ -157,6 +157,17 @@ class JobManager:
                 "last_error": self._last_error,
             }
 
+    def _pause_mining(self, error: str, *, synced: bool | None = None) -> None:
+        with self._lock:
+            if synced is not None:
+                self._synced = synced
+            self._last_error = error
+            self._current = None
+            self._jobs.clear()
+            self._network_target = ""
+            self._broadcast_job = None
+            self._needs_broadcast = False
+
     def _resolve_address_script(self, address: str, cache_attr: str) -> bytes:
         cached = getattr(self, cache_attr, None)
         if cached is not None:
@@ -287,13 +298,15 @@ class JobManager:
             self._height = int(info.get("blocks", 0))
             self._last_error = ""
         except Exception as e:
-            self._synced = False
-            self._last_error = str(e)
+            self._pause_mining(str(e), synced=False)
             log.warning("chain info failed: %s", e)
             return None
 
         if not self._synced:
-            self._last_error = "btxd still syncing — mining paused until caught up"
+            self._pause_mining(
+                "btxd still syncing — mining paused until caught up",
+                synced=False,
+            )
             return None
 
         use_longpoll = (
@@ -304,16 +317,17 @@ class JobManager:
         try:
             gbt, challenge = self._fetch_template(longpoll=use_longpoll)
         except RpcError as e:
-            self._last_error = e.message
+            self._pause_mining(e.message, synced=True)
             log.warning("template fetch failed: %s", e)
             return None
         except Exception as e:
-            self._last_error = str(e)
+            self._pause_mining(str(e), synced=True)
             log.warning("template fetch failed: %s", e)
             return None
 
         job = self._job_from_template(gbt, challenge, clean=clean)
         with self._lock:
+            self._last_error = ""
             self._network_target = job.block_target
             self._height = job.block_height
             current = self._current

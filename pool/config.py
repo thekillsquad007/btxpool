@@ -10,6 +10,7 @@ DEFAULTS: dict[str, Any] = {
     "pool_name": "BTX Family Pool",
     "stratum_host": "0.0.0.0",
     "stratum_port": 3333,
+    "public_hostname": "",
     "api_host": "0.0.0.0",
     "api_port": 8080,
     "cors_origins": [],
@@ -73,6 +74,7 @@ def load_config(path: str | Path | None = None) -> dict[str, Any]:
         "rpc_wallet",
         "wallet_passphrase_file",
         "pool_address",
+        "public_hostname",
         "solver_path",
     ):
         env_key = f"BTXPOOL_{key.upper()}"

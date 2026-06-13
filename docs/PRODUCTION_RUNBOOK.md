@@ -11,6 +11,17 @@
 
 ## Service installation
 
+The current host uses Windows Task Scheduler while WSL systemd is disabled.
+Install or refresh the recurring start, health, peer, and backup tasks from an
+elevated PowerShell prompt:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/install-windows-tasks.ps1
+```
+
+The start task is intentionally idempotent and runs every five minutes, so it
+also recovers the node and pool after WSL or process failure.
+
 WSL systemd must be enabled only during an approved maintenance window.
 After snapshot validation completes:
 
@@ -70,9 +81,34 @@ Run the near-tip check manually:
 bash scripts/ensure-peers.sh
 ```
 
-When no connected peer is within six blocks of the local tip, the check asks
-the node to reconnect to the official BTX fallback peers. It does not disable
-the mining chain guard or select a competing chain.
+The check requires at least three peers with usable sync heights and three
+within two blocks of the local tip, matching the effective peer eligibility
+observed from the node's chain guard.
+When below that threshold it tries the official fallbacks plus recent IPv4
+addresses from the node's own address database. It does not disable the
+mining chain guard or select a competing chain.
+
+Check assume-UTXO background validation progress:
+
+```bash
+bash scripts/snapshot-status.sh
+```
+
+The pool may serve the snapshot chain while the node independently validates
+historical blocks up to the snapshot base height. Do not restart WSL until
+that background validation completes.
+
+## Temporary public hostname
+
+Until a registered domain is available, the live configuration may use:
+
+```text
+btxfamilypool.103-91-16-143.sslip.io
+```
+
+This is direct DNS to the public IP, not a Cloudflare proxy. Cloudflare's
+standard proxy can carry the HTTP dashboard on supported HTTP ports, but raw
+Stratum TCP on port 3333 must use direct DNS or Cloudflare Spectrum.
 
 ## Payout activation
 

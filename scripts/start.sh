@@ -31,7 +31,8 @@ case "$RPC_URL" in
       exit 1
     fi
 
-    if ! "$BTX_CLI" -datadir="$BTX_DATADIR" getblockchaininfo >/dev/null 2>&1; then
+    if ! "$BTX_CLI" -datadir="$BTX_DATADIR" \
+      -conf="$BTX_DATADIR/btx.conf" getblockchaininfo >/dev/null 2>&1; then
       if ! pgrep -f "btxd.*-datadir=$BTX_DATADIR" >/dev/null 2>&1; then
         echo "Starting local btxd..."
         "$BTXD" \
@@ -41,13 +42,15 @@ case "$RPC_URL" in
       fi
 
       for _ in {1..120}; do
-        if "$BTX_CLI" -datadir="$BTX_DATADIR" getblockchaininfo >/dev/null 2>&1; then
+        if "$BTX_CLI" -datadir="$BTX_DATADIR" \
+          -conf="$BTX_DATADIR/btx.conf" getblockchaininfo >/dev/null 2>&1; then
           break
         fi
         sleep 1
       done
 
-      if ! "$BTX_CLI" -datadir="$BTX_DATADIR" getblockchaininfo >/dev/null 2>&1; then
+      if ! "$BTX_CLI" -datadir="$BTX_DATADIR" \
+        -conf="$BTX_DATADIR/btx.conf" getblockchaininfo >/dev/null 2>&1; then
         echo "Local btxd RPC did not become ready."
         exit 1
       fi

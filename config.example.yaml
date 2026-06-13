@@ -5,6 +5,8 @@ pool_name: "BTX Family Pool"
 # Stratum endpoint for miners (amdbtx / btx-nvidia-miner)
 stratum_host: "0.0.0.0"
 stratum_port: 3333
+# Public DNS name shown to miners. Leave empty to use the dashboard hostname.
+public_hostname: "pool.example.com"
 
 # Web dashboard + API. Bind locally and publish through a TLS reverse proxy.
 api_host: "127.0.0.1"
